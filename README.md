@@ -4,9 +4,21 @@ Fútbol multijugador online en cancha poligonal: un arco por jugador.
 3 jugadores → triángulo, 4 → cuadrado, 5 → pentágono… hasta 8.
 Metés un gol: **+1**. Te meten un gol: **−1**. El primero que llega a **3** gana.
 
-## Cómo correrlo
+## Jugar online (deploy gratis)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/AguiarGonzalo/poligol)
+
+Un click en el botón, iniciás sesión en Render (sirve la cuenta de GitHub o Google),
+**Apply** y en ~2 minutos tenés tu URL pública (`https://poligol-XXXX.onrender.com`)
+para compartir con quien quieras. El [render.yaml](render.yaml) configura todo solo.
+
+> Plan gratis de Render: si nadie entra por 15 minutos el server se duerme;
+> el primero en volver espera ~1 minuto mientras despierta.
+
+## Cómo correrlo local
 
 ```bash
+git clone https://github.com/AguiarGonzalo/poligol.git
 cd poligol
 npm install      # solo la primera vez
 npm start        # servidor en http://localhost:3000
