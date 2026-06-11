@@ -4,6 +4,13 @@ Fútbol multijugador online en cancha poligonal: un arco por jugador.
 3 jugadores → triángulo, 4 → cuadrado, 5 → pentágono… hasta 8.
 Metés un gol: **+1**. Te meten un gol: **−1**. El primero que llega a **3** gana.
 
+**Novedades v1.1**: modos **1v1 / 2v2 / todos contra todos**, salas **públicas** (se
+entra desde la lista, sin código) o privadas, sistema de **ready** con cuenta regresiva,
+**4 estadios** con física propia (¡la nieve resbala!), botines animados, relator en
+español, sonidos graciosos, pantalla de opciones, invitación por **WhatsApp** y soporte
+completo para celular apaisado (joystick + botones). Detalle en el
+[CHANGELOG](CHANGELOG.md).
+
 ## Jugar online (deploy gratis)
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/AguiarGonzalo/poligol)
@@ -26,11 +33,13 @@ npm start        # servidor en http://localhost:3000
 
 ## Cómo jugar con amigos
 
-1. Abrí `http://localhost:3000`, poné tu nombre, elegí tu selección y tocá **Crear sala**.
-2. Compartí el código de 4 letras (o tocá el código en la sala de espera: copia el
-   link de invitación directo).
-3. Tus amigos entran con el link o poniendo el código en **Unirse**.
-4. Cuando estén todos (2 a 8), el host toca **¡Empezar partido!**.
+1. Poné tu nombre, elegí tu selección, nombrá tu sala y elegí si es **pública**
+   (cualquiera la ve en la lista y entra sin código) o **privada**.
+2. Invitá: botón de **WhatsApp** en la sala de espera, o copiá el link, o pasá el
+   código de 4 letras.
+3. El host elige **modo** (todos contra todos / 1v1 / 2v2) y **estadio** (Clásico,
+   Noche, Playa, Nieve — cambian la física).
+4. Cuando todos marcan **¡Estoy listo!**, el partido arranca solo (cuenta de 3).
 
 ### Para jugar por internet (no solo en tu casa)
 

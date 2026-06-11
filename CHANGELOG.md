@@ -4,6 +4,53 @@ Todos los cambios notables de PoliGol se documentan acá.
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es/) y el proyecto usa
 versionado semántico.
 
+## [1.1.0] — 2026-06-12
+
+La actualización del juego: modos de equipo, salas públicas y mucho jugo.
+
+### Agregado
+- **Modos de juego**: todos contra todos (2–8), **1 vs 1** y **2 vs 2** con equipos,
+  panel de equipos en el lobby con cambio de lado, scoreboard por equipo y puntaje
+  compartido. El host elige el modo.
+- **Salas públicas o privadas**: al crear una sala elegís visibilidad y nombre. Las
+  públicas aparecen en una lista en la pantalla de inicio (host, jugadores, modo y
+  estadio) y se entra con un click, sin código.
+- **Sistema de READY**: el partido arranca solo cuando TODOS los jugadores marcan
+  "¡Estoy listo!", con cuenta regresiva de 3 s (se cancela si alguien se baja o entra
+  alguien nuevo).
+- **4 estadios** elegidos por el host, con física propia: Clásico, Noche (reflectores
+  y estrellas), Playa (la arena frena la pelota) y Nieve (resbaladizo, con copos).
+- **Botines**: cada jugador tiene 2 pies con zancada animada por distancia recorrida —
+  se lee clarísimo hacia dónde corre cada uno — y pose de barrida con polvito.
+- **Física v1.1**: sub-steps anti-tunneling de la pelota, dribble asistido (llevás la
+  pelota pegada al pie pero te la pueden robar), patadas que heredan tu velocidad,
+  barrida con deslizamiento real de 0.38 s, rebotes pelota-jugador más vivos.
+- **Relator en español** (voz del sistema vía speechSynthesis) con frases de relator
+  argentino: "¡GOOOOOL de…!", "¡Tremenda patada!", "¡Está intratable!" — apagable.
+- **Sonidos graciosos** sintetizados: slide-whistle + boing en la barrida, bocina de
+  aire + ovación en el gol, doink de rebote, fanfarria kazoo del campeón.
+- **Pantalla de opciones** (desde inicio, lobby y partido): volumen master en vivo,
+  relator, calidad de efectos, vibración (móvil) y nombres visibles. Se guardan en el
+  navegador, igual que tu nombre y selección.
+- **Invitación por WhatsApp**: botón en el lobby que abre WhatsApp con el link de la
+  sala listo para mandar (+ botón copiar link).
+- **Mobile apaisado 100%**: joystick dinámico (aparece donde apoyás el dedo, zona
+  izquierda), botones ⚽ y 🦵 a la derecha, fullscreen + bloqueo de orientación
+  apaisada, aviso "girá el teléfono" y vibración en goles y barridas.
+
+### Cambiado
+- La revancha ahora vuelve a la sala de espera (con readies reseteados) en vez de
+  arrancar el partido de una.
+- El botón "Empezar partido" del host se reemplazó por el sistema de ready.
+
+### Corregido
+- El countdown no se cancelaba si un jugador se iba durante la cuenta (el partido
+  podía arrancar con otra cantidad de arcos a la esperada).
+- Sanitización de nombres de sala/jugador (defensa contra HTML malicioso).
+- Mute y apagado del relator ahora aplican también al sonido que está sonando.
+- Fullscreen/orientación en móvil se reintenta en el primer toque dentro del partido.
+- La lista de salas públicas ya no parpadea al refrescarse cada 3 s.
+
 ## [1.0.0] — 2026-06-11
 
 Primera versión jugable. 🎉
