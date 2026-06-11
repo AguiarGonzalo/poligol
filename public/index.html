@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0f1e">
+  <meta name="description" content="PoliGol — fútbol multijugador online en tiempo real sobre una cancha poligonal. Primero a 3 goles gana.">
+  <title>⚽ PoliGol</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="client.js" defer></script>
+</head>
+<body>
+  <main>
+
+    <!-- ============ HOME ============ -->
+    <section id="screen-home" aria-label="Inicio">
+      <div class="home-card glass">
+        <header class="home-header">
+          <h1 class="game-title">⚽ <span class="title-grad">PoliGol</span></h1>
+          <p class="game-tagline">Fútbol multijugador en cancha poligonal · primero a 3 gana</p>
+        </header>
+
+        <div class="field">
+          <label class="field-label" for="name-input">Tu nombre</label>
+          <input id="name-input" class="text-input" type="text" placeholder="Tu nombre"
+                 maxlength="16" autocomplete="off" spellcheck="false">
+        </div>
+
+        <div class="field">
+          <p class="field-label" id="country-grid-label">Elegí tu selección</p>
+          <div id="country-grid" class="country-grid" role="listbox" aria-labelledby="country-grid-label"></div>
+        </div>
+
+        <div class="home-actions">
+          <button id="btn-create" class="btn btn-primary btn-block" type="button">Crear sala</button>
+
+          <div class="divider" aria-hidden="true"><span>o unite a una sala</span></div>
+
+          <div class="join-row">
+            <input id="room-input" class="text-input room-input" type="text" placeholder="CÓDIGO"
+                   maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false"
+                   aria-label="Código de sala (4 letras)">
+            <button id="btn-join" class="btn btn-secondary" type="button">Unirse</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ LOBBY ============ -->
+    <section id="screen-lobby" class="hidden" aria-label="Sala de espera">
+      <div class="lobby-card glass">
+        <h2 class="lobby-heading">Sala de espera</h2>
+
+        <button id="room-code-label" class="room-code" type="button"
+                title="Click para copiar el link de invitación">····</button>
+        <p class="lobby-hint">Tocá el código para copiar el link de invitación</p>
+
+        <ul id="players-list" class="players-list" aria-label="Jugadores en la sala"></ul>
+
+        <div class="lobby-actions">
+          <button id="btn-start" class="btn btn-primary btn-block hidden" type="button" disabled>¡Empezar partido!</button>
+          <button id="btn-leave" class="btn btn-ghost btn-block" type="button">Salir</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ GAME ============ -->
+    <section id="screen-game" class="hidden" aria-label="Partido">
+      <canvas id="game-canvas"></canvas>
+
+      <div id="scoreboard" class="scoreboard" aria-live="polite"></div>
+
+      <div id="overlay" class="overlay" aria-live="assertive"></div>
+
+      <div class="endgame-actions hidden">
+        <button id="btn-rematch" class="btn btn-primary hidden" type="button">Revancha</button>
+        <button id="btn-exit" class="btn btn-ghost" type="button">Salir</button>
+      </div>
+
+      <div id="touch-controls" class="touch-controls">
+        <div id="touch-joystick" class="touch-joystick">
+          <div class="joystick-stick"></div>
+        </div>
+        <div class="touch-buttons">
+          <button id="btn-tackle" class="touch-btn touch-btn-tackle" type="button" aria-label="Barrer">🦵</button>
+          <button id="btn-kick" class="touch-btn touch-btn-kick" type="button" aria-label="Patear">⚽</button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</body>
+</html>
