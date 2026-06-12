@@ -4,6 +4,48 @@ Todos los cambios notables de PoliGol se documentan acá.
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es/) y el proyecto usa
 versionado semántico.
 
+## [1.4.0] — 2026-06-12
+
+Física estilo HaxBall. Reescritura completa del motor para que el juego se sienta
+competitivo y sin delay, como [HaxBall](https://www.haxball.com).
+
+### Cambiado — el juego se siente totalmente distinto
+- **Motor de discos a 60 Hz con momento real** (reverse-engineering del engine de
+  HaxBall): jugadores y pelota tienen masa, inercia y rebote físico. El jugador
+  "pesa" y se desliza un poco — premia anticipar y posicionarse, no apretar rápido.
+- **El kick ahora es como HaxBall**: en vez de un botón direccional, **mantenés
+  apretado patear** y la pelota sale disparada en la dirección *tu cuerpo → la
+  pelota* en el instante que la tocás. Apuntás moviendo el cuerpo. Hay que soltar y
+  volver a apretar para patear de nuevo (cooldown). Es mucho más habilidoso.
+- **La gambeta es 100% física**: empujás la pelota con el cuerpo y la acomodás con
+  toques. Se eliminó la "asistencia de dribbling" anterior (la que te alejaba la
+  pelota y hacía imposible embocarla).
+- **Postes en los arcos**: discos sólidos en los extremos de cada arco — la pelota
+  y los jugadores rebotan ("pegó en el palo y salió").
+- Constantes fieles a HaxBall: jugador radio 15 / damping 0.96 / aceleración 0.1,
+  pelota damping 0.99, restitución de choques `a·b + 1`, paredes que conservan la
+  velocidad. Velocidad terminal ~2.4 u/tick.
+
+### Agregado
+- **Netcode de extrapolación de mundo completo** para el "sin delay": el cliente
+  corre exactamente la misma física que el servidor hacia adelante, así tu jugador
+  y tus disparos responden al instante; el servidor sigue siendo autoritativo y
+  reconcilia suavemente. Slider de extrapolación en Opciones (Auto / 0–200 ms).
+- **Barridas configurables por sala** (`setRules`): el host las puede apagar para
+  un juego "HaxBall puro" (sin barridas), o dejarlas. Chip "Puro" en las salas.
+- Indicador visual de "kick armado" (el jugador se oscurece mientras mantenés
+  patear, como en HaxBall).
+
+### Arquitectura
+- **`public/physics-core.js`**: el motor de física vive en un único módulo UMD
+  compartido — el servidor lo importa y el cliente lo carga. Una sola fuente de
+  verdad ⇒ la predicción del cliente es idéntica a la simulación del servidor (cero
+  drift de determinismo). Verificado byte-idéntico en 4 estadios, 300+ ticks.
+- Estadios re-expresados en el nuevo modelo (la nieve patina de verdad: más
+  inercia, menos agarre; la playa frena la pelota).
+- 1000 jugadores simultáneos siguen entrando: tick p95 4.6 ms (250 salas / load
+  test), sin leaks.
+
 ## [1.3.0] — 2026-06-12
 
 Modo Dúo y partidos configurables.

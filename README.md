@@ -2,14 +2,30 @@
 
 Fútbol multijugador online en cancha poligonal: un arco por jugador.
 3 jugadores → triángulo, 4 → cuadrado, 5 → pentágono… hasta 8.
-Metés un gol: **+1**. Te meten un gol: **−1**. El primero que llega a **3** gana.
+Metés un gol: **+1**. Te meten un gol: **−1**. El primero que llega a **3** gana
+(o a X goles / X minutos, configurable).
 
-**Novedades v1.1**: modos **1v1 / 2v2 / todos contra todos**, salas **públicas** (se
-entra desde la lista, sin código) o privadas, sistema de **ready** con cuenta regresiva,
-**4 estadios** con física propia (¡la nieve resbala!), botines animados, relator en
-español, sonidos graciosos, pantalla de opciones, invitación por **WhatsApp** y soporte
-completo para celular apaisado (joystick + botones). Detalle en el
-[CHANGELOG](CHANGELOG.md).
+**Física estilo HaxBall (v1.4)**: motor de discos con momento real, **sin delay**
+(predicción de mundo completo). El kick es como HaxBall: **mantenés apretado** y la
+pelota sale en la dirección tu cuerpo → la pelota cuando la tocás — apuntás moviéndote.
+La gambeta es pura física, hay **postes** en los arcos, y las barridas son opcionales
+por sala. Detalle en el [CHANGELOG](CHANGELOG.md).
+
+**Modos y extras**: **1v1 / 2v2 / todos contra todos / Dúo** (2 jugadores por persona),
+partido a goles o por tiempo con gol de oro, salas **públicas** o privadas, sistema de
+**ready**, **4 estadios**, relator en español, invitación por **WhatsApp** y celular
+apaisado.
+
+### Controles
+
+| Acción | Teclado | Celular |
+|--------|---------|---------|
+| Moverse | WASD o flechas | Joystick (mantené y arrastrá) |
+| Patear | **mantené** Espacio/J | **mantené** ⚽ (apuntás con el cuerpo) |
+| Barrida (si la sala la permite) | Shift/K | botón 🦵 |
+
+En **Dúo**: jugador A = WASD + F (patear), jugador B = flechas + L. En celular, una
+zona por jugador (mantené sin arrastrar = patear).
 
 ## Jugar online (deploy gratis)
 

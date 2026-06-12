@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * PoliGol — herramienta de carga (SPEC v1.2, sección E.6).
+ * PoliGol — herramienta de carga (SPEC v1.2 E.6 + v1.4 K).
  *
  * Uso:
  *   node tools/loadtest.js --url ws://localhost:3000 --rooms 250 --players 4 --minutes 5
@@ -9,11 +9,16 @@
  * Cada sala: un bot hace create (privada) y al recibir su código entran los joins;
  * todos mandan ready y el server auto-arranca (countdown de 3 s). Los bots mandan
  * input a 20 Hz con movimiento pseudoaleatorio DETERMINISTA (mulberry32, semilla por
- * índice global de bot) y patean (kick:true) al estar cerca de la pelota; cada 2 s
- * mandan {type:"ping", t} y miden RTT con el pong. Tras un gameover el host pide
- * rematch y todos se re-readyan (la sala queda activa toda la corrida).
- * Con --duo (SPEC v1.3 F) el host pone la sala en modo duo y cada bot controla sus
- * DOS cuerpos: los campos planos mueven el slot 0 y el objeto `b` el slot 1.
+ * índice global de bot); cada 2 s mandan {type:"ping", t} y miden RTT con el pong.
+ * Tras un gameover el host pide rematch y todos se re-readyan (la sala queda activa
+ * toda la corrida).
+ * v1.4 K: el kick es ESTADO MANTENIDO. Los bots MANTIENEN kick apretado al acercarse a
+ * la pelota (kick:true mientras está cerca) y lo SUELTAN al alejarse — y además lo
+ * sueltan brevemente cada pocos ticks aun estando cerca para RE-ARMAR el kick (el
+ * núcleo patea una vez por "apretar", hay que soltar para re-patear): así se ejercita
+ * el camino completo de kick mantenido + re-armado. Con --duo (SPEC v1.3 F) el host
+ * pone la sala en modo duo y cada bot controla sus DOS cuerpos: los campos planos
+ * mueven el slot 0 y el objeto `b` el slot 1, ambos con kick mantenido propio.
  *
  * Imprime cada 10 s: salas activas, msgs/s recibidos, RTT p50/p95 (ventana de 10 s);
  * al final, un resumen. NO se incluye en el deploy (tools/ está fuera de public/).
@@ -28,7 +33,8 @@ const WebSocket = require("ws");
 const INPUT_HZ = 20;          // inputs por segundo por bot (SPEC E.6)
 const PING_INTERVAL_MS = 2000; // ping de RTT cada 2 s (como el cliente real)
 const REPORT_MS = 10000;      // reporte cada 10 s (SPEC E.6)
-const KICK_DIST = 60;         // distancia a la pelota a la que el bot "patea"
+const KICK_DIST = 60;         // distancia a la pelota a la que el bot MANTIENE kick (v1.4 K)
+const KICK_REARM_PERIOD = 6;  // v1.4 K: cada N inputs estando cerca, soltar 1 para re-armar
 const ROOM_STAGGER_MS = 25;   // separación entre lanzamientos de salas (anti-estampida)
 const JOIN_STAGGER_MS = 15;   // separación entre joins dentro de una sala
 const READY_DEBOUNCE_MS = 250; // no re-mandar ready más seguido que esto
@@ -145,6 +151,7 @@ class Bot {
     this.dirLeft = 0;        // s hasta el próximo cambio de dirección
     this.lastReadySent = 0;
     this.timers = [];
+    this.kickTick = 0;       // v1.4 K: contador de inputs para re-armar el kick mantenido
     // --duo (v1.3): ids de los CUERPOS propios (del config de start) y estado del
     // cuerpo B (posición + rumbo propio, mismo PRNG del bot: sigue determinista).
     this.duo = !!room.args.duo;
@@ -153,6 +160,7 @@ class Bot {
     this.meB = { x: 0, y: 0 };
     this.dirB = { mx: -1, my: 0 };
     this.dirLeftB = 0;
+    this.kickTickB = 0;      // v1.4 K: contador de re-armado del kick del cuerpo B
   }
 
   connect() {
@@ -305,9 +313,22 @@ class Bot {
     }
   }
 
-  // Movimiento pseudoaleatorio determinista a 20 Hz: cada 0.3–1.5 s elige rumbo
-  // nuevo por cuerpo; kick:true cuando la pelota está cerca (el cooldown lo aplica
-  // el server). Con --duo el mensaje lleva además el objeto `b` del cuerpo slot 1.
+  // v1.4 K: kick MANTENIDO. true mientras la pelota está cerca, pero soltando 1 input
+  // cada KICK_REARM_PERIOD (estando cerca) para RE-ARMAR el kick — el núcleo patea una
+  // sola vez por "apretar"; hay que soltar y re-apretar para volver a patear. Devuelve
+  // el valor de kick (held) para un cuerpo y avanza su contador de re-armado.
+  heldKick(near, counterKey) {
+    if (!near) {
+      this[counterKey] = 0; // lejos: kick suelto (y re-armado para el próximo contacto)
+      return false;
+    }
+    this[counterKey] = (this[counterKey] + 1) % KICK_REARM_PERIOD;
+    return this[counterKey] !== 0; // suelta 1 de cada KICK_REARM_PERIOD ticks (re-arma)
+  }
+
+  // Movimiento pseudoaleatorio determinista a 20 Hz: cada 0.3–1.5 s elige rumbo nuevo
+  // por cuerpo; kick MANTENIDO cuando la pelota está cerca (v1.4 K), soltado para
+  // re-armar. Con --duo el mensaje lleva además el objeto `b` del cuerpo slot 1.
   tickInput() {
     if (!this.playing) return;
     this.dirLeft -= 1 / INPUT_HZ;
@@ -321,7 +342,7 @@ class Bot {
       seq: ++this.seq,
       mx: this.dir.mx,
       my: this.dir.my,
-      kick: near,
+      kick: this.heldKick(near, "kickTick"), // kick mantenido (v1.4 K)
       tackle: false,
     };
     if (this.duo && this.bodyB !== null) {
@@ -331,7 +352,8 @@ class Bot {
         this.pickDir(this.dirB, this.meB);
       }
       const nearB = Math.hypot(this.ball.x - this.meB.x, this.ball.y - this.meB.y) <= KICK_DIST;
-      msg.b = { mx: this.dirB.mx, my: this.dirB.my, kick: nearB, tackle: false };
+      // b.kick mantenido (v1.4 K): el cuerpo B también mantiene/suelta su propio kick.
+      msg.b = { mx: this.dirB.mx, my: this.dirB.my, kick: this.heldKick(nearB, "kickTickB"), tackle: false };
     }
     this.send(msg);
   }

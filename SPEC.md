@@ -642,3 +642,244 @@ de nombre en ambos cuerpos (B con "②").
 - TODO lo demás de v1.2 (predicción, push de salas, packs de voz, métricas,
   loadtest) queda intacto. tools/loadtest.js: agregar flag opcional `--duo`
   (las salas se crean en modo duo con inputs dobles) sin romper el modo default.
+
+---
+
+# v1.4 — FÍSICA ESTILO HAXBALL (PISA toda la física previa de v1/v1.1/v1.2/v1.3)
+
+Objetivo: replicar la jugabilidad de HaxBall (haxball.com) — competitiva, pesada/precisa,
+sin delay. Se reemplaza el modelo de física entero por el de HaxBall (motor de discos a
+60 Hz con dt=1, colisiones por momento, kick por contacto). Se conserva TODO lo demás de
+v1.3: geometría poligonal (n = equipos), modos ffa/1v1/2v2/duo, objetivo goles/tiempo,
+estadios, salas, relator, métricas. Fuente: reverse-engineering del engine
+(wxyz-abcd/node-haxball src/api.js). Esta sección es NORMATIVA y EXACTA.
+
+## A. Unidades y orden de tick (CAMBIO FUNDAMENTAL)
+
+- La simulación corre a **60 Hz con paso fijo dt = 1** (NO en segundos). Las velocidades
+  se expresan en **unidades de mundo por TICK** (no por segundo). speed = 1 ⇒ 1 unidad/tick
+  ⇒ 60 u/s. Se elimina la integración exponencial (`exp(-FRICTION*dt)`) de versiones
+  previas: el damping ahora es geométrico por tick (`speed *= damping`).
+- El mundo conserva las coordenadas actuales (circunradio R = 380, etc.). Las constantes de
+  HaxBall son compatibles de escala (su cancha ≈ 740×340 ≈ la nuestra; radios casi iguales).
+- **Orden EXACTO por tick del servidor** (autoritativo):
+  1. **Input de jugadores → aceleración**: para cada cuerpo controlado, agregar a su speed
+     el vector de input × aceleración (ver C). Diagonales normalizadas ×(1/√2).
+  2. **Kick**: para cada cuerpo con kick "mantenido", si la pelota está en alcance y el
+     cooldown venció, aplicar impulso (ver D). El kick modifica speeds ANTES de integrar.
+  3. **Integración + damping de TODOS los discos, en un solo paso, en este orden por disco**:
+        `pos.x += speed.x;  pos.y += speed.y;`
+        `speed.x = damping * (speed.x + gravity.x);  speed.y = damping * (speed.y + gravity.y);`
+     (gravity = 0 en PoliGol). El damping del cuerpo usa `kickingDamping` mientras mantiene
+     kick (igual a damping por defecto). Es decir: se mueve con la velocidad vieja y LUEGO
+     se amortigua.
+  4. **Colisiones** (después de mover y amortiguar), en este orden:
+     a) disco–disco (cada par una vez), b) disco–segmento (paredes), c) disco–vértice
+     (esquinas/postes como vértices o discos estáticos). Ver B.
+  5. Detección de gol / pelota afuera (igual que antes: centro de la pelota cruza el segmento
+     del arco hacia afuera). Reloj de tiempo (v1.3) descuenta 1/60 s por tick en juego.
+
+## B. Colisiones (fórmulas EXACTAS de HaxBall)
+
+Restitución combinada SIEMPRE = `a.bCoef * b.bCoef + 1` (producto + 1). El impulso se
+aplica SOLO si la velocidad relativa normal es negativa (se están acercando). La corrección
+posicional se reparte por invMass. Un disco con invMass = 0 es inamovible (no colisiona con
+geometría estática; sí frena a otros discos).
+
+**Disco A vs disco B** (ambos con invMass; si uno es estático su invMass = 0):
+```
+dx = A.x - B.x;  dy = A.y - B.y;  d2 = dx*dx + dy*dy;  rs = A.r + B.r
+if (0 < d2 && d2 <= rs*rs) {
+  d = sqrt(d2);  nx = dx/d;  ny = dy/d;             // normal A←B
+  ratio = A.invMass / (A.invMass + B.invMass);      // si suma 0, no resolver
+  pen = rs - d;
+  A.x += nx*pen*ratio;  A.y += ny*pen*ratio;
+  B.x -= nx*pen*(1-ratio);  B.y -= ny*pen*(1-ratio);
+  rel = nx*(A.vx-B.vx) + ny*(A.vy-B.vy);
+  if (rel < 0) {
+    f = rel * (A.bCoef*B.bCoef + 1);
+    A.vx -= nx*f*ratio;        A.vy -= ny*f*ratio;
+    B.vx += nx*f*(1-ratio);    B.vy += ny*f*(1-ratio);
+  }
+}
+```
+
+**Disco vs segmento de pared** (segmento recto entre dos puntos P0,P1; bCoef pared = 1).
+Solo discos con invMass>0. Detectar dentro del tramo (proyección entre P0 y P1), normal del
+segmento, profundidad T = r − distancia con signo; si penetra (T>0): empujar el disco fuera
+por la normal y, si va hacia la pared (vel·normal < 0), reflejar:
+```
+vn = nx*v.x + ny*v.y;
+if (vn < 0) { vn *= (disc.bCoef * 1 + 1); v.x -= nx*vn; v.y -= ny*vn; }  // bCoef pared = 1
+```
+Las paredes del polígono son segmentos rectos entre vértices del lado (excluyendo la boca
+del arco). El caso n=2 (rectángulo) idem con sus 4 paredes y las bocas.
+
+**Vértice / poste** (punto estático con bCoef): igual que disco–disco con el vértice
+inamovible (solo se mueve el disco). Usar para las esquinas del polígono y para los POSTES
+del arco (ver F).
+
+## C. Movimiento del jugador (EXACTO)
+
+- Constantes (unidades/tick):
+  ```
+  PLAYER_R = 15;  PLAYER_INVMASS = 0.5;  PLAYER_BCOEF = 0.5;
+  PLAYER_DAMPING = 0.96;  KICKING_DAMPING = 0.96;
+  ACCEL = 0.1;            // aceleración normal por tick²
+  KICKING_ACCEL = 0.07;   // mientras mantiene kick
+  BALL_R = 10;  BALL_INVMASS = 1;  BALL_BCOEF = 0.5;  BALL_DAMPING = 0.99;
+  WALL_BCOEF = 1;  POST_R = 8;  POST_BCOEF = 0.5;
+  KICK_STRENGTH = 5;  KICKBACK = 0;  KICK_REACH = 4;  // alcance = PLAYER_R+BALL_R+4 = 29
+  KICK_COOLDOWN_TICKS = 2;
+  DIAG = 0.7071067811865476; // 1/√2
+  ```
+- Input → dirección {dx,dy} ∈ {-1,0,1}² (8 direcciones). Si dx≠0 && dy≠0: `dx*=DIAG; dy*=DIAG`.
+  `speed += dir * (kickHeld ? KICKING_ACCEL : ACCEL)`.
+- Velocidad terminal resultante ≈ 2.4 u/tick (144 u/s) normal, 1.68 u/tick (100.8 u/s) con
+  kick. El jugador tiene INERCIA real (se desliza un poco), pero el control es firme: este
+  "peso" es el feel de HaxBall. NO hay tope duro de velocidad (lo limita el damping).
+- Se ELIMINA por completo el "dribble assist" de v1.2/v1.3. La gambeta es 100% física:
+  empujás la pelota con el cuerpo (colisión con restitución) y la acomodás con toques de kick.
+
+## D. KICK estilo HaxBall (reemplaza el kick direccional previo — LO MÁS IMPORTANTE)
+
+El kick deja de ser un botón direccional (ya no usa `facing` ni KICK_POWER/KICK_RANGE viejos).
+
+- **Input `kick` pasa a ser un ESTADO MANTENIDO** (true mientras la tecla/botón está
+  apretado), no un edge-trigger. (Tackle sigue siendo edge-trigger, ver E.)
+- Por cuerpo el server mantiene: `kickHeld` (del input), `kickCd` (cooldown en ticks),
+  `kickArmed` (bool: hay que SOLTAR y volver a apretar entre kicks).
+- Cada tick (paso 2 del orden A), para cada cuerpo:
+  ```
+  if (kickCd > 0) kickCd--;
+  if (kickHeld && kickArmed && kickCd <= 0) {
+    // ¿pelota en alcance?
+    dx = ball.x - body.x;  dy = ball.y - body.y;  dist = hypot(dx,dy);
+    if (dist - BALL_R - PLAYER_R < KICK_REACH) {     // dist < 29
+      nx = dx/dist; ny = dy/dist;                     // dirección CUERPO→PELOTA
+      ball.vx += KICK_STRENGTH * nx * BALL_INVMASS;   // impulso 5 (pelota salta a speed 5)
+      ball.vy += KICK_STRENGTH * ny * BALL_INVMASS;
+      body.vx -= KICKBACK * nx * PLAYER_INVMASS;      // retroceso (KICKBACK=0 ⇒ nulo)
+      body.vy -= KICKBACK * ny * PLAYER_INVMASS;
+      ball.lastTouch = body;                           // para el gol
+      kickCd = KICK_COOLDOWN_TICKS;  kickArmed = false; // hay que soltar para re-patear
+      emitKickEvent(body);                             // para sfx/anim cliente
+    }
+  }
+  if (!kickHeld) kickArmed = true;                      // soltar re-arma
+  ```
+- Apuntás moviendo el cuerpo: la pelota sale en la línea de tu centro al de la pelota.
+  Mantené kick apretado mientras te acercás y dispara solo al tocarla. Toques sucesivos
+  (soltar+apretar) permiten conducir/amagar.
+- Mientras `kickHeld`, el jugador usa `KICKING_ACCEL` (0.07) en vez de ACCEL (más lento al
+  cargar el disparo) y un tinte visual distinto (indicador de "armado", como HaxBall).
+
+## E. Barrida (tackle) — opción de sala
+
+- HaxBall NO tiene barrida. Para no perder la feature, es **configurable por el host**:
+  `{type:"setRules", tackles:bool}` (solo host, lobby; default `true`). Se agrega a `lobby`
+  y a las cards de `rooms` (`tackles`). Toggle UI `#rule-tackles` (checkbox; junto a
+  modo/estadio/objetivo). Con `tackles:false` el juego es "HaxBall puro".
+- Si está activa, la barrida se reexpresa en unidades/tick del nuevo modelo: edge-trigger,
+  rango PLAYER_R*2+14, knockback como impulso (≈7 u/tick) al rival, stun 0.9 s, slide del
+  que barre 0.38 s. Mantener el comportamiento de v1.3 pero con magnitudes en u/tick
+  coherentes con el nuevo damping.
+
+## F. Geometría: postes de arco (detalle HaxBall)
+
+- En cada extremo de la boca de cada arco, agregar un **poste**: disco estático
+  (invMass = 0, radius = POST_R = 8, bCoef = POST_BCOEF = 0.5). La pelota y los jugadores
+  rebotan en el poste (clásico "pegó en el palo"). Cliente: dibujar los postes (circulito
+  claro) en los extremos del arco.
+- Las paredes del lado (a ambos lados de la boca) son segmentos con WALL_BCOEF = 1.
+- El gol se detecta igual que antes (centro de pelota cruza el segmento de la boca hacia
+  afuera), PERO ahora puede pegar en el poste y volver. Mantener el margen de detección.
+
+## G. Estadios re-expresados al modelo HaxBall (multiplicadores sobre damping/accel)
+
+| stadium | efecto (sobre las constantes del nuevo modelo) |
+|---------|-----------------------------------------------|
+| clasico | sin cambios |
+| noche   | sin cambios (solo visual) |
+| playa   | BALL_DAMPING 0.99 → 0.97 (la arena frena la pelota antes) |
+| nieve   | PLAYER_DAMPING 0.96 → 0.99 y ACCEL/KICKING_ACCEL ×0.6 (patina: más inercia, menos
+            agarre); BALL_DAMPING 0.99 → 0.995 |
+
+Aplicar como multiplicadores/reemplazos al armar el partido, reseteados entre partidos.
+DEBEN ser idénticos en server y cliente (la predicción depende de eso).
+
+## H. Netcode: extrapolación de mundo completo (el "sin delay" de HaxBall)
+
+HaxBall logra el feel clonando el estado autoritativo y simulándolo hacia adelante. Se
+extiende la predicción v1.2 (que solo predecía el cuerpo propio) a **mundo completo**:
+
+- El server sigue siendo autoritativo a 60 Hz y manda snapshots a 30 Hz (state) con TODOS
+  los discos (cuerpos + pelota) en unidades/tick, redondeados a 2 decimales (más precisión
+  que el 1 decimal de v1.2: las velocidades chicas por tick lo necesitan), `iq` por cuerpo
+  propio, y campos en 0 omitidos.
+- **Cliente** mantiene una copia del último snapshot autoritativo y, cada frame de render,
+  **simula el mundo entero hacia adelante** con EXACTAMENTE la misma física (mismo orden,
+  mismas fórmulas, mismas constantes que el server) por la cantidad de ticks =
+  `extrapolación` (ver abajo), aplicando:
+  - sus PROPIOS inputs reales (cuerpo[s] propio[s]) → respuesta instantánea, cero delay;
+  - para los rivales: mantener su último input conocido (se asume que siguen igual);
+  - la pelota se simula con todos: tu kick mueve la pelota AL INSTANTE localmente.
+- **Cantidad de extrapolación**: adaptativa = `round(RTT/2 / 16.67) + 1` ticks, clamp [1, 12]
+  (≈ medio RTT, tope 200 ms como HaxBall). Configurable en opciones
+  (`#opt-extrapolation`, slider 0–200 ms, default "Auto"). 0 = sin extrapolar (ver el pasado
+  interpolado, suave pero con delay); más = más responsivo y más "snap" cuando falla.
+- **Reconciliación / anti-snap**: al llegar un snapshot nuevo, reemplazar el estado base por
+  el del server; la diferencia entre lo que se mostraba y la nueva predicción se absorbe con
+  un offset visual que decae ~120 ms (como v1.2) POR DISCO (pelota incluida); si el error es
+  enorme (> 60 u) se hace snap directo. Esto evita el temblor pero mantiene la respuesta.
+- La simulación del cliente DEBE ser determinista y byte-compatible con el server: mismo
+  orden de discos, mismas operaciones, `Math.fround` opcional no requerido (un solo cliente
+  no necesita bit-perfect cross-client, solo coherencia con el server vía reconciliación).
+- Implementación: factorizar la física en una función pura `stepWorld(state, inputsById,
+  rules)` reusable por server (autoritativo) y cliente (extrapolación). Mantener el costo
+  acotado (un puñado de discos por partido; extrapolar ≤12 ticks por frame es trivial).
+
+## I. Protocolo (cambios v1.4)
+
+- `input`: `kick` y `b.kick` pasan a ser ESTADO MANTENIDO (true mientras apretado). Se
+  agrega que el cliente mande input inmediato también al SOLTAR kick (flanco de bajada).
+  `tackle`/`b.tackle` siguen edge-trigger.
+- `{type:"setRules", tackles:bool}` (host, lobby). `lobby` y `rooms` ganan `tackles`.
+- `state`: velocidades en u/tick, 2 decimales. Se agrega por disco propio `ka` (kickArmed,
+  bool) y `kh` (kickHeld efectivo) para feedback; `kc` ahora en TICKS restantes de cooldown
+  (entero). La pelota lleva además `lt` (id del cuerpo de lastTouch) opcional para color del
+  relator. Campos en 0 omitidos.
+- Eventos `kick` por cuerpo (server→cliente, opcional, para sfx/anim precisos):
+  `{type:"kicked", id:"p1a"}`. El cliente igual hace feedback local inmediato.
+- Todo lo demás del protocolo v1.3 intacto.
+
+## J. Cliente — render y controles (cambios v1.4)
+
+- **Indicador de kick armado**: el cuerpo propio cambia de aspecto (aro/tinte) mientras
+  mantenés kick (como HaxBall, que oscurece al jugador). Mostrar también un sutil resplandor
+  cuando el kick está en cooldown.
+- **Postes**: dibujar los dos postes de cada arco (discos claros radio 8).
+- **Controles** (el kick ahora es "mantener"):
+  - Teclado no-duo: mantener `Espacio`/`J` = kick mantenido (mientras esté apretado).
+    Tackle (si la sala lo permite): `Shift`/`K` edge.
+  - Teclado duo: A mantener `F` = kick A; B mantener `L` = kick B; tackle A=`G`, B=`K` (edge).
+  - Táctil no-duo: botón ⚽ = kick mantenido (mientras el dedo está sobre el botón). Botón 🦵
+    tackle (si permitido).
+  - Táctil duo: en cada zona, **mantener apretado el dedo (sin arrastrar) = kick mantenido**
+    de ese cuerpo (encaja con HaxBall: tocás y mantenés para cargar/disparar al tocar la
+    pelota). Arrastrar = mover. Esto reemplaza el "tap=patear" de v1.3 por algo más fiel:
+    un toque corto sin mover = un pulso de kick (mantener mientras el dedo esté abajo).
+    Doble-tap mantenido sigue disponible para tackle si la sala lo permite.
+- Opciones: `#opt-extrapolation` (slider Auto/0–200 ms). Si `tackles:false`, ocultar
+  controles/leyendas de barrida.
+- El relator y los sfx siguen por cuerpo/usuario. El "pop" del kick suena con el evento
+  local inmediato.
+
+## K. Compatibilidad y migración
+
+- Esta versión cambia la SENSACIÓN del juego a propósito (es el pedido). No se mantiene
+  compat de física con clientes viejos (mismo deploy actualiza ambos lados).
+- tools/loadtest.js: los bots deben mandar `kick` como estado mantenido (mantener apretado
+  al acercarse a la pelota) para ejercitar el nuevo camino.
+- Mantener /health, /metrics (+bodies), salas públicas por push, packs de voz, predicción
+  reconciliada (ahora de mundo completo), modos y objetivo de partido.

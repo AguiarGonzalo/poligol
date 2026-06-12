@@ -1,17 +1,14 @@
 /*
- * PoliGol — servidor autoritativo (v1.2).
+ * PoliGol — servidor autoritativo (v1.4 — FÍSICA ESTILO HAXBALL).
  * Node.js (CommonJS): http estático (http + fs + path) + WebSocket ("ws") sobre el
  * mismo server. Salas públicas/privadas con código de 4 letras, lobby con modos
- * (ffa/1v1/2v2), estadios, readies con auto-arranque, partido por EQUIPOS con física
- * a 60 Hz (sub-steps de pelota, dribble assist, slide) y broadcast a 30 Hz, goles,
- * puntajes por equipo, rematch, desconexiones y heartbeat.
- * v1.2 (secciones A/B/C del SPEC): netcode con `seq` por input + `iq` por jugador en
- * state (reconciliación), redondeo a 1 decimal de posiciones/velocidades, ping/pong
- * de aplicación, KICK BUFFER de 160 ms, retune (ACCEL/FRICTION/KICK_RANGE), dribble
- * assist arreglado (condición de pelota controlada) y suscripción `subRooms` con
- * push coalesced de la lista de salas públicas.
- * v1.2 (sección E — escalabilidad): snapshots compactos (stun/kc/slide ausentes si
- * 0), backpressure por conexión (64 KB saltea snapshot / 512 KB cierra), UN interval
+ * (ffa/1v1/2v2/duo), estadios, readies con auto-arranque, partido por EQUIPOS y
+ * broadcast a 30 Hz, goles, puntajes por equipo, rematch, desconexiones y heartbeat.
+ * v1.2 (secciones A/B/C del SPEC): netcode con `seq` por input + `iq` por cuerpo en
+ * state (reconciliación), ping/pong de aplicación y suscripción `subRooms` con push
+ * coalesced de la lista de salas públicas.
+ * v1.2 (sección E — escalabilidad): snapshots compactos (campos en 0 ausentes),
+ * backpressure por conexión (64 KB saltea snapshot / 512 KB cierra), UN interval
  * global a 60 Hz para todas las salas en juego (un solo stringify por sala por
  * broadcast), GET /health y /metrics (ventana móvil de 10 s), y límites anti-abuso
  * (MAX_CONN, máx 1000 salas, rate limit de mensajes por conexión).
@@ -23,7 +20,18 @@
  * configurable con setMatch (target "goals"|"time" + whitelist de values), reloj `tl`
  * en state (solo target=time, corre solo con pelota en juego), GOL DE ORO al empatar
  * y campo reason ("goals"|"time"|"golden") en gameover; /metrics gana `bodies`.
- * Implementa el contrato definido en SPEC.md (v1 + v1.1 + v1.2 + v1.3) al pie de la letra.
+ * v1.4 (FÍSICA ESTILO HAXBALL — PISA toda la física previa): el motor de física es
+ * AHORA el núcleo compartido public/physics-core.js (úsado por server y cliente sin
+ * redefinir nada). El loop global de 60 Hz llama `stepWorld(state, inputs, arena,
+ * arena.phys, rules)` por sala en juego y luego `goalCheck`. dt=1, u/tick, damping
+ * geométrico, colisiones por momento (restitución a.bCoef*b.bCoef+1), kick por
+ * contacto MANTENIDO (estado, no edge), postes de arco, estadios re-expresados.
+ * INPUT v1.4: kick y b.kick son ESTADO MANTENIDO (true mientras apretado, mandado
+ * también al soltar); tackle/b.tackle siguen edge-trigger. setRules{tackles} (host,
+ * lobby; default true) en lobby y rooms; barrida solo si rules.tackles. state v1.4:
+ * velocidades u/tick a 2 decimales, ka (kickArmed) y kc (cooldown en TICKS) por
+ * cuerpo propio, ball.lt (lastTouch) opcional; evento {type:"kicked", id} al patear.
+ * Implementa SPEC.md (v1 + v1.1 + v1.2 + v1.3 + v1.4) al pie de la letra.
  */
 
 "use strict";
@@ -33,55 +41,30 @@ const fs = require("fs");
 const path = require("path");
 const WebSocket = require("ws");
 
+// v1.4: NÚCLEO COMPARTIDO de física (HaxBall). Misma fuente de verdad que el cliente
+// (public/physics-core.js, cargado allá con <script>). Ruta relativa desde server.js.
+const Phys = require("./public/physics-core.js");
+
 /* ========================= Constantes compartidas (SPEC) ========================= */
 
-const R = 380;              // circunradio del polígono (unidades de mundo)
-const PLAYER_R = 14;        // radio del jugador
-const BALL_R = 10;          // radio de la pelota
-const GOAL_W = 112;         // ancho del arco = 4 × diámetro del jugador (4 × 28)
-const WIN_SCORE = 3;        // puntaje objetivo
-const TICK = 1 / 60;        // física del server a 60 Hz
+const WIN_SCORE = 3;        // puntaje objetivo (default del objetivo "goals")
+const TICK = 1 / 60;        // física del server a 60 Hz (dt=1 dentro del núcleo)
 const SNAP_HZ = 30;         // broadcast de estado a 30 Hz
-const MAX_PLAYERS = 8;
+const MAX_PLAYERS = 8;      // cuerpos máximos en un partido
 const MIN_PLAYERS = 2;
-// Movimiento (retune v1.2 — sección B; IDÉNTICAS en client.js: la predicción depende)
-const ACCEL = 1600;         // u/s² aplicada según input normalizado (v1.2: antes 1400)
-const MAX_SPEED = 230;      // u/s velocidad máxima del jugador
-const FRICTION = 7.5;       // damping exponencial jugador: v *= exp(-FRICTION*dt) sin input (v1.2: antes 6)
-// Pelota
-const BALL_FRICTION = 0.9;  // damping exponencial pelota: v *= exp(-BALL_FRICTION*dt)
-const BALL_MAX_SPEED = 750;
-const WALL_BOUNCE = 0.82;   // restitución contra paredes
-// Acciones
-const KICK_RANGE = 44;      // distancia centro-a-centro máx para patear la pelota (v1.2: antes 36)
-const KICK_POWER = 560;     // velocidad que adquiere la pelota al ser pateada
-const KICK_COOLDOWN = 0.35; // s
-const TACKLE_RANGE = 42;    // distancia centro-a-centro máx para barrer a un rival
-const TACKLE_STUN = 0.9;    // s que el rival queda tirado
-const TACKLE_COOLDOWN = 1.6;  // s
 const GOAL_PAUSE = 2.0;     // s de pausa tras un gol antes de resetear
 
-/* ============================ Constantes v1.1 (SPEC) ============================= */
-
-// Física v1.1
-const BALL_SUBSTEPS = 4;          // sub-pasos de integración de la pelota por tick
-const KICK_VEL_FACTOR = 0.45;     // v1.1: patada = KICK_POWER + 0.45 × vel del jugador
-const DRIBBLE_RANGE = PLAYER_R + BALL_R + 8; // 32 u — distancia máx del assist
-const DRIBBLE_FORCE = 320;        // u/s² hacia el punto de control (v1.2: antes 400)
-const DRIBBLE_AHEAD = 22;         // punto objetivo a 22 u adelante del jugador (facing)
-const DRIBBLE_MAX_REL = 240;      // velocidad relativa máx pelota-jugador del assist (v1.2: antes 260)
-const DRIBBLE_MIN_SPEED = 40;     // el assist requiere velocidad del jugador > 40
-const DRIBBLE_CTRL_REL = 140;     // v1.2 (d): assist solo si |vBall − vPlayer| < 140 (pelota controlada)
-const SLIDE_DURATION = 0.38;      // s de barrida (slide): vel fija, sin control
-const SLIDE_SPEED = 320;          // velocidad fija durante el slide
-const SLIDE_KNOCKBACK = 420;      // v1.1: knockback al rival al conectar (pisa 380 de v1)
-const SLIDE_BALL_FACTOR = 0.6;    // impulso a la pelota = 0.6 × SLIDE_KNOCKBACK
-const BALL_PLAYER_E = 0.4;        // v1.1: restitución pelota-jugador
-const BALL_PLAYER_TRANSFER = 0.8; // v1.1: transferencia de la velocidad del jugador
+// v1.4: TODAS las constantes de física y geometría (radios, masas, damping, kick,
+// barrida, circunradio, ancho de arco, spawns) viven en el núcleo (Phys.*) y el server
+// NO redefine ninguna. La geometría se obtiene de Phys.buildArena() por partido; la
+// simulación, de Phys.stepWorld()/Phys.goalCheck(). El server solo conserva constantes
+// de protocolo/sala/escalabilidad (abajo).
 
 /* ============================ Constantes v1.2 (SPEC) ============================= */
 
-const KICK_BUFFER = 0.16;         // s que se recuerda la intención de kick fuera de rango (sección A)
+// v1.4: el KICK BUFFER de v1.2 (recordar la intención de patear fuera de rango) ya no
+// aplica — el kick es por contacto MANTENIDO (mantenés apretado y dispara al tocar la
+// pelota), así que el "apreté y no pateó" desaparece sin buffer.
 const ROOMS_PUSH_MS = 250;        // coalescing del push de salas a suscriptos (sección C)
 
 // Escalabilidad (sección E)
@@ -106,7 +89,7 @@ const METRICS_WINDOW_MS = 10000;   // E.4: ventana móvil de las métricas de ti
 // USUARIOS vs CUERPOS (sección A): en modo "duo" cada usuario controla 2 cuerpos.
 const DUO_BODIES = 2;            // cuerpos por usuario en duo (slots 0 y 1)
 const DUO_CAPACITY = 4;          // duo: 4 usuarios máx (8 cuerpos = MAX_PLAYERS)
-const DUO_SPAWN_D = 55;          // duo: cuerpos separados ±55 perpendicular a centro→arco
+// Spawns (duo ±55, 2v2 ±90, factor 0.62) los resuelve arena.spawns() del núcleo.
 // Objetivo de partido configurable (sección D, setMatch solo host): whitelist EXACTA.
 const MATCH_GOALS_VALUES = [1, 3, 5, 10];       // target "goals" (default 3 = WIN_SCORE)
 const MATCH_TIME_VALUES = [120, 180, 300, 600]; // target "time", en segundos
@@ -116,40 +99,17 @@ const MODES = ["ffa", "1v1", "2v2", "duo"];
 const STADIUMS = ["clasico", "noche", "playa", "nieve"];
 const MAX_ROOM_NAME_LEN = 24;     // roomName sanitizado a ≤ 24 chars (SPEC)
 const START_COUNTDOWN_S = 3;      // auto-arranque: "starting" y partido 3 s después
-const TEAM_SPAWN_DY = 90;         // 2v2: compañeros separados ±90 en y (SPEC)
 
 /* ===================== Constantes propias de esta implementación ================= */
 
-const SPAWN_FACTOR = 0.62;       // spawn del jugador k en 0.62 × M_k (SPEC)
-const RECT_W = 480;              // half-extent horizontal para n = 2 (SPEC)
-const RECT_H = 290;              // half-extent vertical para n = 2 (SPEC)
 const HEARTBEAT_MS = 15000;      // ping cada 15 s (SPEC)
 const TICKS_PER_SNAP = Math.round(1 / TICK / SNAP_HZ); // 60/30 = 2 ticks por broadcast
 const MAX_NAME_LEN = 16;         // sanitización de nombres (elección libre)
 const PORT = process.env.PORT || 3000;
 
-/* ===================== Estadios: multiplicadores de física (SPEC) ================ */
-
-// Constantes efectivas de física para un estadio, según la tabla EXACTA del SPEC:
-// clasico/noche sin cambios; playa BALL_FRICTION ×1.8; nieve ACCEL ×0.55,
-// FRICTION ×0.45, BALL_FRICTION ×0.5 y WALL_BOUNCE = 0.9 (valor absoluto).
-function stadiumPhysics(stadium) {
-  const eff = {
-    accel: ACCEL,
-    friction: FRICTION,
-    ballFriction: BALL_FRICTION,
-    wallBounce: WALL_BOUNCE,
-  };
-  if (stadium === "playa") {
-    eff.ballFriction = BALL_FRICTION * 1.8;
-  } else if (stadium === "nieve") {
-    eff.accel = ACCEL * 0.55;
-    eff.friction = FRICTION * 0.45;
-    eff.ballFriction = BALL_FRICTION * 0.5;
-    eff.wallBounce = 0.9;
-  }
-  return eff;
-}
+// v1.4: la física de estadio (multiplicadores sobre damping/accel del modelo HaxBall)
+// la aplica el núcleo en buildArena(n, stadium) → arena.phys. El server NO redefine
+// física: usa arena.phys tal cual en cada stepWorld.
 
 /* ============================== Server http estático ============================== */
 
@@ -240,13 +200,10 @@ const server = http.createServer((req, res) => {
 
 /* ================================== Utilidades ================================== */
 
+// v1.4 I: posiciones y velocidades del state a 2 decimales (las velocidades chicas en
+// u/tick necesitan esta precisión para la extrapolación de mundo completo del cliente).
 function r2(v) {
   return Math.round(v * 100) / 100;
-}
-
-// v1.2: posiciones y velocidades del state a 1 decimal (~35% menos bytes de JSON).
-function r1(v) {
-  return Math.round(v * 10) / 10;
 }
 
 function num(v) {
@@ -338,6 +295,7 @@ function broadcastLobby(room, notice) {
     stadium: room.stadium,
     target: room.target, // objetivo de partido (v1.3 D): "goals" | "time"
     value: room.value,   // goles objetivo o segundos, según target
+    tackles: room.tackles, // v1.4 E: barrida on/off (host, default true)
     players: room.players.map((p, i) => ({
       id: p.id,
       name: p.name,
@@ -519,52 +477,10 @@ function removePlayer(ws) {
 
 /* ============================= Geometría de la cancha ============================ */
 
-/*
- * Cada pared se representa como:
- *   { cx, cy }  — punto central del segmento (para los lados k es M_k)
- *   { dx, dy }  — dirección unitaria a lo largo de la pared
- *   { nx, ny }  — normal unitaria EXTERIOR
- *   half        — semilongitud del segmento
- *   goal        — índice de EQUIPO dueño del arco centrado en (cx, cy), o null (v1.1)
- *
- * Distancia exterior de un punto p: d = (p − c)·n  (d < 0 ⇒ adentro).
- * Proyección sobre la pared (0 en el centro del arco): s = (p − c)·dir.
- */
-function buildWalls(n) {
-  if (n === 2) {
-    return [
-      { cx: -RECT_W, cy: 0, dx: 0, dy: 1, nx: -1, ny: 0, half: RECT_H, goal: 0 },
-      { cx: RECT_W, cy: 0, dx: 0, dy: 1, nx: 1, ny: 0, half: RECT_H, goal: 1 },
-      { cx: 0, cy: -RECT_H, dx: 1, dy: 0, nx: 0, ny: -1, half: RECT_W, goal: null },
-      { cx: 0, cy: RECT_H, dx: 1, dy: 0, nx: 0, ny: 1, half: RECT_W, goal: null },
-    ];
-  }
-
-  const walls = [];
-  for (let k = 0; k < n; k++) {
-    const a0 = -Math.PI / 2 + (2 * Math.PI * k) / n;
-    const a1 = -Math.PI / 2 + (2 * Math.PI * ((k + 1) % n)) / n;
-    const ax = R * Math.cos(a0);
-    const ay = R * Math.sin(a0);
-    const bx = R * Math.cos(a1);
-    const by = R * Math.sin(a1);
-    const mx = (ax + bx) / 2;
-    const my = (ay + by) / 2;
-    const len = Math.hypot(bx - ax, by - ay);
-    const mlen = Math.hypot(mx, my);
-    walls.push({
-      cx: mx,
-      cy: my,
-      dx: (bx - ax) / len,
-      dy: (by - ay) / len,
-      nx: mx / mlen, // la normal interior es -M/|M| ⇒ la exterior es M/|M|
-      ny: my / mlen,
-      half: len / 2,
-      goal: k,
-    });
-  }
-  return walls;
-}
+// v1.4: la geometría (paredes como segmentos, POSTES de arco, bocas, spawns y la
+// física de estadio) la construye el núcleo con Phys.buildArena(n, stadium). El server
+// NO redefine geometría ni física: usa arena.* y arena.phys tal cual en stepWorld y
+// goalCheck. (La vieja buildWalls — paredes-lado completas sin postes — se eliminó.)
 
 /* =================================== Partido ==================================== */
 
@@ -590,21 +506,22 @@ function startMatch(room) {
   });
 
   const n = teamLists.length;
-  const walls = buildWalls(n);
+  // v1.4: arena del NÚCLEO (paredes-segmento, POSTES, bocas, spawns y phys del estadio).
+  const arena = Phys.buildArena(n, room.stadium);
   // CUERPOS (v1.3 A/E): se crean ACÁ, al armar el partido (no en el lobby). 1 por
-  // usuario en ffa/1v1/2v2 (id del cuerpo = id de usuario: compat clientes v1.2) o
+  // usuario en ffa/1v1/2v2 (id del cuerpo = id de usuario: compat de ids con v1.3) o
   // 2 por usuario en duo (ids únicos propios "p3a"/"p3b", slots 0 y 1). owner y slot
   // van SIEMPRE en start (uniforme). state.players = este array de cuerpos.
   const perUser = room.mode === "duo" ? DUO_BODIES : 1;
   const bodies = [];              // todos los cuerpos (orden: equipo, usuario, slot)
-  const bodyById = new Map();     // bodyId → cuerpo (lastTouch / goles / slide)
+  const bodyById = new Map();     // bodyId → cuerpo (lastTouch / goles)
   const bodiesByUser = new Map(); // userId → [cuerpo slot 0, (cuerpo slot 1)]
   const scores = new Array(n).fill(0);
+  // v1.4: el slot del núcleo codifica el offset de spawn. En no-duo 2v2 los dos
+  // compañeros usan slot=0/1 para separarse ±90; en duo cada cuerpo usa su slot real.
+  const spawnMode = room.mode; // "ffa" | "1v1" | "2v2" | "duo"
 
   for (let k = 0; k < n; k++) {
-    const goalWall = walls.find((w) => w.goal === k);
-    const baseX = SPAWN_FACTOR * goalWall.cx;
-    const baseY = SPAWN_FACTOR * goalWall.cy;
     const members = teamLists[k];
 
     for (let j = 0; j < members.length; j++) {
@@ -613,51 +530,33 @@ function startMatch(room) {
       bodiesByUser.set(p.id, userBodies);
 
       for (let slot = 0; slot < perUser; slot++) {
-        let sx = baseX;
-        let sy = baseY;
-        if (perUser === DUO_BODIES) {
-          // Spawns duo (v1.3 A): los 2 cuerpos del equipo en el spawn v1 de su
-          // lado, separados ±55 PERPENDICULAR a la dirección centro→arco (que es
-          // la normal exterior del arco propio).
-          const off = slot === 0 ? -DUO_SPAWN_D : DUO_SPAWN_D;
-          sx += -goalWall.ny * off;
-          sy += goalWall.nx * off;
-        } else if (members.length === 2) {
-          // Spawns 2v2: compañeros en el x de spawn v1 y separados ±90 en y (SPEC).
-          sy += j === 0 ? -TEAM_SPAWN_DY : TEAM_SPAWN_DY;
-        }
-        const body = {
+        // El núcleo resuelve spawn + facing inicial según el modo. En 2v2 el offset
+        // ±90 lo selecciona el índice de compañero (j); en duo lo selecciona el slot.
+        const spawnSlot = spawnMode === "2v2" ? j : slot;
+        const sp = arena.spawns(k, spawnSlot, spawnMode);
+        // Cuerpo del NÚCLEO (todos los campos de estado v1.4: kickCd/kickArmed/kickHeld,
+        // stun/slide/sdx/sdy/tackleCd/slideHit/slideBall). makeBody NO redefine física.
+        const body = Phys.makeBody({
           id: perUser === DUO_BODIES ? p.id + (slot === 0 ? "a" : "b") : p.id,
-          owner: p.id,   // id del USUARIO dueño (el playerId de `joined`)
-          ownerRef: p,   // referencia al usuario: iq del state = ownerRef.lastSeq
-          slot,          // 0 (cuerpo A) | 1 (cuerpo B)
-          name: p.name,
-          country: p.country,
           team: k,
-          // Spawn propio del cuerpo. Facing inicial: hacia el centro (= −normal
-          // exterior del arco propio).
-          spawn: { x: sx, y: sy, fx: -goalWall.nx, fy: -goalWall.ny },
-          x: sx,
-          y: sy,
-          vx: 0,
-          vy: 0,
-          fx: -goalWall.nx,
-          fy: -goalWall.ny,
-          // v1.3 B: cooldowns, kick-buffer, facing, stun y slide son POR CUERPO.
-          stun: 0,
-          kc: 0,
-          tc: 0,
-          kickBuf: 0,      // v1.2: s restantes del KICK BUFFER (intención de patear)
-          slide: 0,        // s restantes de barrida (0 si no) — va en state (v1.1)
-          sdx: 0,          // dirección fija del slide
-          sdy: 0,
-          slideHit: null,  // Set de ids de CUERPOS rivales ya conectados por este slide
-          slideBall: false, // la pelota ya recibió el impulso de este slide
-          ix: 0,
-          iy: 0,
-          wantKick: false,
-          wantTackle: false,
-        };
+          slot,          // 0 (cuerpo A) | 1 (cuerpo B)
+          owner: p.id,   // id del USUARIO dueño (el playerId de `joined`)
+          x: sp.x,
+          y: sp.y,
+          fx: sp.fx,
+          fy: sp.fy,
+        });
+        // Metadatos del server (no los toca el núcleo): usuario, nombre, país, spawn.
+        body.ownerRef = p;   // iq del state = ownerRef.lastSeq
+        body.name = p.name;
+        body.country = p.country;
+        body.spawn = { x: sp.x, y: sp.y, fx: sp.fx, fy: sp.fy };
+        // Input MANTENIDO por cuerpo (v1.4 I): movimiento + kick (held) + tackle (edge).
+        // Lo setea handleInput; lo lee tickRoom para armar inputsById de stepWorld.
+        body.inMx = 0;
+        body.inMy = 0;
+        body.inKick = false;
+        body.inTackle = false;
         bodies.push(body);
         bodyById.set(body.id, body);
         userBodies.push(body);
@@ -665,16 +564,17 @@ function startMatch(room) {
     }
   }
 
+  const ball = Phys.makeBall();
+
   room.match = {
     n,
-    walls,
+    arena,                 // v1.4: geometría + phys del estadio (del núcleo)
     bodies,
     bodyById,
     bodiesByUser,
     scores,
-    phys: stadiumPhysics(room.stadium), // multiplicadores del estadio (v1.1)
-    ball: { x: 0, y: 0, vx: 0, vy: 0 },
-    lastTouch: null, // id del CUERPO del último toque, o null (v1.3 A)
+    rules: { tackles: room.tackles !== false }, // v1.4 E: barrida on/off (snapshot del lobby)
+    ball,
     paused: false,
     pauseLeft: 0,
     winnerTeam: null,
@@ -694,6 +594,9 @@ function startMatch(room) {
       mode: room.mode,
       stadium: room.stadium,
       n, // n === teams.length; el arco k pertenece al equipo k
+      target: room.target, // objetivo del partido (v1.3 D): "goals" | "time"
+      value: room.value,   // goles objetivo o segundos según target
+      tackles: room.tackles !== false, // v1.4 E: barrida on/off (snapshot del lobby)
       // teams.players y players listan CUERPOS (v1.3 A): en no-duo coinciden 1:1
       // con los usuarios (id = playerId, slot 0, owner = el propio usuario).
       teams: teamLists.map((members) => ({
@@ -725,126 +628,37 @@ function resetPositions(m) {
     b.vy = 0;
     b.fx = sp.fx;
     b.fy = sp.fy;
+    // v1.4: estado del modelo HaxBall (núcleo). kickArmed parte en true (re-armado).
+    b.kickCd = 0;
+    b.kickArmed = true;
+    b.kickHeld = false;
     b.stun = 0;
-    b.kc = 0;
-    b.tc = 0;
-    b.kickBuf = 0;
     b.slide = 0;
     b.sdx = 0;
     b.sdy = 0;
+    b.tackleCd = 0;
     b.slideHit = null;
     b.slideBall = false;
-    b.wantKick = false;
-    b.wantTackle = false;
+    // Input mantenido por cuerpo (lo aplica handleInput; lo limpia el reset).
+    b.inMx = 0;
+    b.inMy = 0;
+    b.inKick = false;
+    b.inTackle = false;
   }
   m.ball.x = 0;
   m.ball.y = 0;
   m.ball.vx = 0;
   m.ball.vy = 0;
-  m.lastTouch = null;
+  m.ball.lastTouch = null;
 }
 
-function clampBallSpeed(ball) {
-  const sp = Math.hypot(ball.vx, ball.vy);
-  if (sp > BALL_MAX_SPEED) {
-    const f = BALL_MAX_SPEED / sp;
-    ball.vx *= f;
-    ball.vy *= f;
-  }
-}
-
-// Patada (v1.2): ejecuta la patada SOLO si la pelota está en rango (devuelve true).
-// Con el KICK BUFFER (sección A) el intento fuera de rango ya NO quema el cooldown:
-// queda bufferedo en b.kickBuf y se ejecuta en el primer tick en que la pelota entra
-// en rango dentro de los 160 ms (si el buffer expira sin conectar, no pasa nada).
-function tryKick(m, b) {
-  const dist = Math.hypot(m.ball.x - b.x, m.ball.y - b.y);
-  if (dist > KICK_RANGE) return false;
-  b.kc = KICK_COOLDOWN;
-  m.ball.vx = b.fx * KICK_POWER + KICK_VEL_FACTOR * b.vx;
-  m.ball.vy = b.fy * KICK_POWER + KICK_VEL_FACTOR * b.vy;
-  clampBallSpeed(m.ball);
-  m.lastTouch = b.id; // lastTouch = CUERPO (v1.3 A)
-  return true;
-}
-
-// Barrida v1.1: el que barre entra en "slide" de SLIDE_DURATION s con velocidad fija
-// SLIDE_SPEED hacia su facing (sin control de movimiento). Luego corre su cooldown
-// normal (tc = SLIDE_DURATION + TACKLE_COOLDOWN: al terminar el slide queda 1.6 s).
-function startSlide(b) {
-  b.tc = SLIDE_DURATION + TACKLE_COOLDOWN;
-  b.slide = SLIDE_DURATION;
-  // Dirección fija del slide = facing (guard anti-NaN).
-  const fl = Math.hypot(b.fx, b.fy);
-  if (fl > 1e-9) {
-    b.sdx = b.fx / fl;
-    b.sdy = b.fy / fl;
-  } else {
-    b.sdx = 1;
-    b.sdy = 0;
-  }
-  b.slideHit = new Set();
-  b.slideBall = false;
-}
-
-// Conexión del slide (se evalúa cada tick mientras dura): cada CUERPO RIVAL (otro
-// equipo) en rango recibe knockback SLIDE_KNOCKBACK + stun TACKLE_STUN una sola vez
-// por slide; la pelota en rango sale a 0.6 × SLIDE_KNOCKBACK (una vez por slide).
-// Compañeros y el otro cuerpo del MISMO usuario (duo) no se barren (mismo equipo).
-function slideConnect(m, b) {
-  const myTeam = b.team;
-
-  for (const qb of m.bodies) {
-    if (qb === b) continue;
-    if (qb.team === myTeam) continue; // compañeros (y el cuerpo B propio) no se barren
-    if (b.slideHit.has(qb.id)) continue;
-    const dx = qb.x - b.x;
-    const dy = qb.y - b.y;
-    const d = Math.hypot(dx, dy);
-    if (d <= TACKLE_RANGE) {
-      let nx;
-      let ny;
-      if (d > 1e-9) {
-        nx = dx / d;
-        ny = dy / d;
-      } else {
-        nx = b.sdx;
-        ny = b.sdy;
-      }
-      qb.vx += nx * SLIDE_KNOCKBACK;
-      qb.vy += ny * SLIDE_KNOCKBACK;
-      qb.stun = TACKLE_STUN;
-      qb.slide = 0; // el stun corta el slide del rival barrido
-      b.slideHit.add(qb.id);
-    }
-  }
-
-  if (!b.slideBall) {
-    const bdx = m.ball.x - b.x;
-    const bdy = m.ball.y - b.y;
-    const bd = Math.hypot(bdx, bdy);
-    if (bd <= TACKLE_RANGE) {
-      let nx;
-      let ny;
-      if (bd > 1e-9) {
-        nx = bdx / bd;
-        ny = bdy / bd;
-      } else {
-        nx = b.sdx;
-        ny = b.sdy;
-      }
-      m.ball.vx += nx * SLIDE_BALL_FACTOR * SLIDE_KNOCKBACK;
-      m.ball.vy += ny * SLIDE_BALL_FACTOR * SLIDE_KNOCKBACK;
-      clampBallSpeed(m.ball);
-      m.lastTouch = b.id; // lastTouch = CUERPO (v1.3 A)
-      b.slideBall = true;
-    }
-  }
-}
+// v1.4: el kick (por contacto MANTENIDO), la barrida (opcional por sala) y todas las
+// colisiones las resuelve el núcleo dentro de stepWorld. El server NO redefine física:
+// tryKick/startSlide/slideConnect/clampBallSpeed se eliminaron.
 
 function onGoal(room, concededTeam) {
   const m = room.match;
-  const lt = m.lastTouch; // id del CUERPO del último toque, o null (v1.3 A)
+  const lt = m.ball.lastTouch; // id del CUERPO del último toque, o null (v1.3 A / v1.4)
   const ltBody = lt !== null ? m.bodyById.get(lt) : null;
   const ltTeam = ltBody ? ltBody.team : null;
   // Gol en contra: el último toque fue de un cuerpo del EQUIPO que recibe (incluye
@@ -875,7 +689,7 @@ function onGoal(room, concededTeam) {
   m.ball.y = 0;
   m.ball.vx = 0;
   m.ball.vy = 0;
-  m.lastTouch = null;
+  m.ball.lastTouch = null;
   m.paused = true;
   m.pauseLeft = GOAL_PAUSE;
 
@@ -967,29 +781,36 @@ function broadcastState(room) {
   if (!m) return;
   // v1.3 A/B: state.players = CUERPOS. iq = lastSeq del USUARIO dueño: en duo viaja
   // el MISMO valor en ambos cuerpos propios (un solo seq por mensaje de input).
+  // v1.4 I: velocidades en u/tick a 2 decimales (las velocidades chicas por tick lo
+  // necesitan para la extrapolación de mundo completo del cliente). ka (kickArmed,
+  // bool) y kh (kickHeld efectivo) van por cuerpo para el feedback de "armado"; kc es
+  // AHORA el cooldown en TICKS restantes (entero). stun/slide en TICKS. Campos en 0
+  // (o false) se OMITEN (el cliente asume 0/false si faltan).
   const players = [];
   for (const b of m.bodies) {
     const o = {
       id: b.id,
-      x: r1(b.x),
-      y: r1(b.y),
-      vx: r1(b.vx),
-      vy: r1(b.vy),
+      x: r2(b.x),
+      y: r2(b.y),
+      vx: r2(b.vx),
+      vy: r2(b.vy),
       fx: r2(b.fx),
       fy: r2(b.fy),
       iq: b.ownerRef.lastSeq,
     };
-    const stun = r2(b.stun);
-    const kc = r2(b.kc);
-    const slide = r2(b.slide);
-    if (stun > 0) o.stun = stun;
-    if (kc > 0) o.kc = kc;
-    if (slide > 0) o.slide = slide;
+    if (b.stun > 0) o.stun = b.stun;           // ticks restantes de stun
+    if (b.kickCd > 0) o.kc = b.kickCd;         // ticks restantes de cooldown (v1.4)
+    if (b.slide > 0) o.slide = b.slide;        // ticks restantes de barrida
+    if (b.kickArmed) o.ka = 1;                  // armado (puede patear al tocar)
+    if (b.kickHeld) o.kh = 1;                   // kick mantenido efectivo (tinte visual)
     players.push(o);
   }
+  const ball = { x: r2(m.ball.x), y: r2(m.ball.y), vx: r2(m.ball.vx), vy: r2(m.ball.vy) };
+  // v1.4 I: lt = id del cuerpo del último toque (color del relator), opcional.
+  if (m.ball.lastTouch != null) ball.lt = m.ball.lastTouch;
   const snap = {
     type: "state",
-    ball: { x: r1(m.ball.x), y: r1(m.ball.y), vx: r1(m.ball.vx), vy: r1(m.ball.vy) },
+    ball,
     players,
     scores: m.scores.slice(),
     paused: m.paused,
@@ -1012,250 +833,57 @@ function broadcastState(room) {
   }
 }
 
+// Mapa de inputs reutilizado por tick (evita asignar un objeto por sala por tick).
+// stepWorld lee inputsById[body.id] = {mx,my,kick,tackle}; lo poblamos por cuerpo
+// desde su input MANTENIDO (mx/my/kick mantenido; tackle edge — ver handleInput).
+const TICK_INPUTS = Object.create(null);
+
 function tickRoom(room) {
   const m = room.match;
   if (!m || room.status !== "playing") return;
-  const dt = TICK;
-  const phys = m.phys; // constantes efectivas del estadio (v1.1)
+  const dt = TICK; // 1/60 s real para el reloj de tiempo (v1.3 D); la física usa dt=1.
 
-  /* ---- Cuerpos: cooldowns, stun, slide, acciones y movimiento (Euler semi-impl.) ---- */
-  for (const b of m.bodies) {
-    const stunned = b.stun > 0;
-    if (stunned) b.stun = Math.max(0, b.stun - dt);
-    if (b.kc > 0) b.kc = Math.max(0, b.kc - dt);
-    if (b.tc > 0) b.tc = Math.max(0, b.tc - dt);
-    if (b.kickBuf > 0) b.kickBuf = Math.max(0, b.kickBuf - dt);
-
-    // Acciones edge-trigger: se consumen acá respetando cooldowns, stun y slide.
-    // KICK BUFFER (v1.2 A): el kick presionado carga 160 ms de intención; se ejecuta
-    // en el primer tick con la pelota en rango y cooldown listo (en rango = ejecuta
-    // ya mismo, como antes). Expirado el buffer, el intento se descarta sin cooldown.
-    if (!stunned && b.slide <= 0 && !m.paused) {
-      if (b.wantKick) b.kickBuf = KICK_BUFFER;
-      if (b.kickBuf > 0 && b.kc <= 0 && tryKick(m, b)) b.kickBuf = 0;
-      if (b.wantTackle && b.tc <= 0) startSlide(b);
-    }
-    b.wantKick = false;
-    b.wantTackle = false;
-
-    // Durante la pausa post-gol la física de los jugadores queda congelada
-    // (igual que la pelota); los cooldowns sí siguen corriendo arriba.
-    if (!m.paused) {
-      if (stunned && b.slide > 0) b.slide = 0; // el stun corta el slide propio
-
-      if (b.slide > 0) {
-        // Slide (v1.1): velocidad fija hacia la dirección de barrida, sin control.
-        b.vx = b.sdx * SLIDE_SPEED;
-        b.vy = b.sdy * SLIDE_SPEED;
-        slideConnect(m, b);
-        b.slide = Math.max(0, b.slide - dt);
-      } else {
-        const ilen = Math.hypot(b.ix, b.iy);
-        if (!stunned && ilen > 1e-9) {
-          b.vx += b.ix * phys.accel * dt;
-          b.vy += b.iy * phys.accel * dt;
-          const sp = Math.hypot(b.vx, b.vy);
-          if (sp > MAX_SPEED) {
-            // Por encima de MAX_SPEED (knockback/slide) la velocidad decae con la
-            // fricción del estadio hasta MAX_SPEED en vez de recortarse de golpe.
-            const target = Math.max(MAX_SPEED, sp * Math.exp(-phys.friction * dt));
-            b.vx *= target / sp;
-            b.vy *= target / sp;
-          }
-        } else {
-          const f = Math.exp(-phys.friction * dt);
-          b.vx *= f;
-          b.vy *= f;
-        }
-      }
-
-      b.x += b.vx * dt;
-      b.y += b.vy * dt;
-    }
-  }
-
-  const list = m.bodies; // todos los CUERPOS (v1.3: la física no distingue dueños)
-
-  if (!m.paused) {
-    /* ---- Colisión círculo-círculo entre cuerpos (se empujan) ---- */
-    for (let i = 0; i < list.length; i++) {
-      for (let j = i + 1; j < list.length; j++) {
-        const a = list[i];
-        const c = list[j];
-        const dx = c.x - a.x;
-        const dy = c.y - a.y;
-        const dist = Math.hypot(dx, dy);
-        const minD = 2 * PLAYER_R;
-        if (dist < minD) {
-          let nx;
-          let ny;
-          if (dist > 1e-9) {
-            nx = dx / dist;
-            ny = dy / dist;
-          } else {
-            nx = 1;
-            ny = 0;
-          }
-          const push = (minD - dist) / 2;
-          a.x -= nx * push;
-          a.y -= ny * push;
-          c.x += nx * push;
-          c.y += ny * push;
-          // Anular la componente de acercamiento (choque inelástico sobre la normal).
-          const rel = (c.vx - a.vx) * nx + (c.vy - a.vy) * ny;
-          if (rel < 0) {
-            a.vx += (nx * rel) / 2;
-            a.vy += (ny * rel) / 2;
-            c.vx -= (nx * rel) / 2;
-            c.vy -= (ny * rel) / 2;
-          }
-        }
-      }
-    }
-
-    /* ---- Confinamiento de jugadores: deslizan contra TODAS las paredes (incl. arcos) ---- */
-    for (const b of list) {
-      for (const w of m.walls) {
-        const d = (b.x - w.cx) * w.nx + (b.y - w.cy) * w.ny;
-        if (d > -PLAYER_R) {
-          b.x -= w.nx * (d + PLAYER_R);
-          b.y -= w.ny * (d + PLAYER_R);
-          const vn = b.vx * w.nx + b.vy * w.ny;
-          if (vn > 0) {
-            b.vx -= w.nx * vn;
-            b.vy -= w.ny * vn;
-          }
-        }
-      }
-    }
-  }
-
-  /* ---- Pelota o cuenta regresiva de la pausa post-gol ---- */
+  /* ---- Pausa post-gol: la física queda congelada (igual que v1.3); solo corre la
+     cuenta regresiva. Los inputs mantenidos se preservan en cada cuerpo. ---- */
   if (m.paused) {
     m.pauseLeft -= dt;
     if (m.pauseLeft <= 0) endPause(room);
   } else {
-    const ball = m.ball;
-
-    /* -- Dribble assist (v1.2 B, arreglado): aplica SOLO si TODAS las condiciones:
-       (a) pelota a ≤ PLAYER_R+BALL_R+8 del cuerpo,
-       (b) es el CUERPO MÁS CERCANO a la pelota (v1.3: entre cuerpos, no usuarios),
-       (c) |vel jugador| > 40,
-       (d) |vBall − vPlayer| < 140 (pelota "controlada", moviéndose con el jugador —
-           NO al llegarle a una pelota quieta o que viene de frente: bug v1.1).
-       Fuerza 320 u/s² hacia el punto a 22 u delante del facing; cap relativo 240. -- */
-    let nearest = null;
-    let nearestD = Infinity;
-    for (const b of list) {
-      const d = Math.hypot(ball.x - b.x, ball.y - b.y);
-      if (d < nearestD) {
-        nearestD = d;
-        nearest = b;
-      }
+    /* ---- v1.4: UN paso del NÚCLEO HaxBall. stepWorld(state, inputsById, arena, phys,
+       rules) resuelve TODO: input→aceleración, kick MANTENIDO por contacto, barrida
+       (si rules.tackles), integración+damping (dt=1), colisiones (discos, paredes,
+       postes) y confinamiento. Pura/determinista: misma fórmula que la extrapolación
+       del cliente. Devuelve eventos {type:"kicked"|"tackle", id, victim?}. ---- */
+    // Poblar inputsById desde el input mantenido de cada cuerpo. tackle es un PULSO:
+    // se consume este tick y se baja (edge-trigger), igual que en el cliente.
+    for (const k in TICK_INPUTS) delete TICK_INPUTS[k];
+    for (const b of m.bodies) {
+      TICK_INPUTS[b.id] = {
+        mx: b.inMx,
+        my: b.inMy,
+        kick: b.inKick,        // MANTENIDO (true mientras apretado)
+        tackle: b.inTackle,    // edge: lo dispara este tick
+      };
+      b.inTackle = false;      // consumir el pulso de tackle (edge-trigger)
     }
-    if (nearest && nearestD <= DRIBBLE_RANGE) { // (a) + (b)
-      const psp = Math.hypot(nearest.vx, nearest.vy);
-      const relSp = Math.hypot(ball.vx - nearest.vx, ball.vy - nearest.vy);
-      const ballSp = Math.hypot(ball.vx, ball.vy);
-      // (e) enmienda: una pelota EN REPOSO nunca recibe assist (hasta el primer
-      // contacto físico que la mueva) — sin esto, acercarse despacio (40 < v < 140)
-      // a una pelota quieta la empujaba lejos, el residuo del bug v1.1.
-      if (psp > DRIBBLE_MIN_SPEED && relSp < DRIBBLE_CTRL_REL && ballSp > 30) { // (c)+(d)+(e)
-        const tx = nearest.x + nearest.fx * DRIBBLE_AHEAD;
-        const ty = nearest.y + nearest.fy * DRIBBLE_AHEAD;
-        let ax = tx - ball.x;
-        let ay = ty - ball.y;
-        const al = Math.hypot(ax, ay);
-        if (al > 1e-9) { // guard anti-NaN
-          ax /= al;
-          ay /= al;
-          ball.vx += ax * DRIBBLE_FORCE * dt;
-          ball.vy += ay * DRIBBLE_FORCE * dt;
-          const rvx = ball.vx - nearest.vx;
-          const rvy = ball.vy - nearest.vy;
-          const rl = Math.hypot(rvx, rvy);
-          if (rl > DRIBBLE_MAX_REL) {
-            const s = DRIBBLE_MAX_REL / rl;
-            ball.vx = nearest.vx + rvx * s;
-            ball.vy = nearest.vy + rvy * s;
-          }
+
+    // state que espera stepWorld: {bodies, ball, rules}. m ya tiene esos campos.
+    const events = Phys.stepWorld(m, TICK_INPUTS, m.arena, m.arena.phys, m.rules);
+
+    // Eventos del tick → cliente (sfx/anim precisos). {type:"kicked", id} al patear
+    // (v1.4 I). Los de "tackle" no requieren mensaje propio (el cliente los infiere).
+    if (events.length > 0) {
+      for (let e = 0; e < events.length; e++) {
+        if (events[e].type === "kicked") {
+          broadcast(room, { type: "kicked", id: events[e].id });
         }
       }
     }
 
-    const f = Math.exp(-phys.ballFriction * dt);
-    ball.vx *= f;
-    ball.vy *= f;
-    clampBallSpeed(ball);
-
-    /* -- Sub-steps ×4 (v1.1, anti-tunneling): la pelota integra movimiento y resuelve
-       colisiones (jugadores, paredes, gol) en 4 sub-pasos por tick. -- */
-    const sdt = dt / BALL_SUBSTEPS;
-    let goalScored = false;
-    for (let step = 0; step < BALL_SUBSTEPS && !goalScored; step++) {
-      ball.x += ball.vx * sdt;
-      ball.y += ball.vy * sdt;
-
-      // Pelota vs jugadores (v1.1): restitución 0.4 + transferencia 0.8 de la
-      // velocidad del jugador. Cada contacto registra lastTouch.
-      for (let k = 0; k < list.length; k++) {
-        const b = list[k];
-        const dx = ball.x - b.x;
-        const dy = ball.y - b.y;
-        const dist = Math.hypot(dx, dy);
-        const minD = PLAYER_R + BALL_R;
-        if (dist < minD) {
-          let nx;
-          let ny;
-          if (dist > 1e-9) {
-            nx = dx / dist;
-            ny = dy / dist;
-          } else {
-            const fl = Math.hypot(b.fx, b.fy);
-            if (fl > 1e-9) {
-              nx = b.fx / fl;
-              ny = b.fy / fl;
-            } else {
-              nx = 1;
-              ny = 0;
-            }
-          }
-          ball.x += nx * (minD - dist);
-          ball.y += ny * (minD - dist);
-          const tvx = BALL_PLAYER_TRANSFER * b.vx;
-          const tvy = BALL_PLAYER_TRANSFER * b.vy;
-          const rvn = (ball.vx - tvx) * nx + (ball.vy - tvy) * ny;
-          if (rvn < 0) {
-            ball.vx -= (1 + BALL_PLAYER_E) * rvn * nx;
-            ball.vy -= (1 + BALL_PLAYER_E) * rvn * ny;
-          }
-          m.lastTouch = list[k].id; // lastTouch = CUERPO (v1.3 A)
-        }
-      }
-      clampBallSpeed(ball);
-
-      // Paredes y detección de gol (arco k = equipo k).
-      for (const w of m.walls) {
-        const d = (ball.x - w.cx) * w.nx + (ball.y - w.cy) * w.ny;
-        const s = (ball.x - w.cx) * w.dx + (ball.y - w.cy) * w.dy;
-        if (w.goal !== null && Math.abs(s) <= GOAL_W / 2 - BALL_R) {
-          // Boca del arco: la pelota pasa sin rebotar; gol cuando el centro cruza la línea.
-          if (d > 0) {
-            onGoal(room, w.goal);
-            goalScored = true;
-            break;
-          }
-        } else if (d > -BALL_R) {
-          ball.x -= w.nx * (d + BALL_R);
-          ball.y -= w.ny * (d + BALL_R);
-          const vn = ball.vx * w.nx + ball.vy * w.ny;
-          if (vn > 0) {
-            ball.vx -= (1 + phys.wallBounce) * vn * w.nx;
-            ball.vy -= (1 + phys.wallBounce) * vn * w.ny;
-          }
-        }
-      }
-    }
+    // Detección de gol (el server decide el resto): el centro de la pelota cruzó la
+    // boca de algún arco hacia afuera. goalCheck devuelve el equipo que recibió, o -1.
+    const conceded = Phys.goalCheck(m.ball, m.arena);
+    if (conceded >= 0) onGoal(room, conceded);
   }
 
   /* ---- Reloj de partido (v1.3 D, target=time): corre ÚNICAMENTE con la pelota en
@@ -1390,6 +1018,7 @@ function handleCreate(ws, msg) {
     stadium: "clasico", // "clasico" | "noche" | "playa" | "nieve"
     target: "goals", // objetivo de partido (v1.3 D): "goals" | "time"
     value: WIN_SCORE, // goles objetivo (default 3) o segundos según target
+    tackles: true,   // v1.4 E: barrida activa (default true; host la togglea con setRules)
     players: [],
     nextPlayerNum: 1,
     status: "lobby", // "lobby" | "playing" | "gameover"
@@ -1436,6 +1065,7 @@ function buildRoomsList() {
       stadium: room.stadium,
       target: room.target, // v1.3 D: las cards muestran el objetivo ("a 3 goles" / "5 min")
       value: room.value,
+      tackles: room.tackles, // v1.4 E: las cards muestran si la barrida está activa
     });
   }
   return list;
@@ -1573,6 +1203,22 @@ function handleSetMatch(ws, msg) {
   notifyRoomsChanged(); // target/value se muestran en las cards de salas (v1.3 D)
 }
 
+// {type:"setRules", tackles:bool} — solo host, solo lobby (v1.4 E). Activa/desactiva
+// la barrida (default true). Con tackles:false el juego es "HaxBall puro". NO resetea
+// readies. Se refleja en lobby y en las cards de salas (rooms).
+function handleSetRules(ws, msg) {
+  const room = ws.roomRef;
+  if (!room || room.status !== "lobby" || !ws.playerRef) return;
+  if (room.players[0] !== ws.playerRef) {
+    return sendError(ws, "Solo el host puede cambiar las reglas");
+  }
+  if (typeof msg.tackles !== "boolean") return sendError(ws, "Regla inválida");
+  if (room.tackles === msg.tackles) return;
+  room.tackles = msg.tackles;
+  broadcastLobby(room); // los readies quedan como estaban (SPEC v1.4 E)
+  notifyRoomsChanged(); // tackles se muestra en las cards de salas (v1.4 E)
+}
+
 // rematch (host, tras gameover): vuelve AL LOBBY con readies reseteados (v1.1);
 // el partido arranca de nuevo solo por readies (auto-arranque).
 function handleRematch(ws) {
@@ -1587,9 +1233,12 @@ function handleRematch(ws) {
 }
 
 // Aplica un paquete de input (los campos planos o el objeto `b` de duo, con las
-// MISMAS validaciones/clamps — v1.3 B) a UN cuerpo.
+// MISMAS validaciones/clamps — v1.3 B) a UN cuerpo. v1.4 I: kick es ESTADO MANTENIDO
+// (se setea Y se baja con cada input, no es edge), tackle sigue edge-trigger.
 function applyBodyInput(b, src) {
   // Clampear cada componente a [-1, 1] y normalizar si |v| > 1 (server-side, SPEC).
+  // El núcleo discretiza a 8 direcciones (clampDir) dentro de stepWorld; acá guardamos
+  // el vector de movimiento MANTENIDO tal cual (la última intención del cliente).
   let mx = clamp(num(src.mx), -1, 1);
   let my = clamp(num(src.my), -1, 1);
   const len = Math.hypot(mx, my);
@@ -1597,20 +1246,25 @@ function applyBodyInput(b, src) {
     mx /= len;
     my /= len;
   }
-  b.ix = mx;
-  b.iy = my;
+  b.inMx = mx;
+  b.inMy = my;
 
-  // facing = último input de movimiento no nulo (unitario). Durante el slide no hay
-  // control: la dirección de barrida quedó fija y el facing no cambia (v1.1).
-  const l2 = Math.hypot(mx, my);
-  if (l2 > 1e-9 && b.slide <= 0) {
-    b.fx = mx / l2;
-    b.fy = my / l2;
-  }
+  // kick: estado MANTENIDO (v1.4 D/I). true mientras el cliente lo reporta apretado;
+  // al soltar manda input con kick:false y acá baja. El núcleo re-arma al soltar.
+  b.inKick = src.kick === true;
 
-  // kick/tackle edge-trigger: quedan pendientes hasta el próximo tick, que los consume.
-  if (src.kick === true) b.wantKick = true;
-  if (src.tackle === true) b.wantTackle = true;
+  // tackle: edge-trigger (v1.4 E). Solo se SETEA en true; el tick lo consume y baja.
+  // No se limpia acá (un input con tackle:false no debe borrar un pulso pendiente).
+  if (src.tackle === true) b.inTackle = true;
+}
+
+// Limpia el input MANTENIDO de un cuerpo cuyo input no vino en el mensaje (en duo,
+// cuerpo B sin `b`): queda quieto y suelta el kick (v1.3 B + v1.4 I).
+function clearBodyInput(b) {
+  b.inMx = 0;
+  b.inMy = 0;
+  b.inKick = false;
+  // El tackle pendiente (si lo hubiera) se respeta hasta que el tick lo consuma.
 }
 
 function handleInput(ws, msg) {
@@ -1634,15 +1288,14 @@ function handleInput(ws, msg) {
   }
 
   // Campos planos → cuerpo slot 0. En duo, el objeto `b` (opcional, mismos clamps)
-  // controla el slot 1; SIN `b` el cuerpo B queda con movimiento 0 (quieto) y sin
-  // acciones (v1.3 B). En modos no-duo el server IGNORA `b` (un solo cuerpo).
+  // controla el slot 1; SIN `b` el cuerpo B queda con movimiento 0 (quieto) y suelta
+  // el kick (v1.3 B + v1.4 I). En modos no-duo el server IGNORA `b` (un solo cuerpo).
   applyBodyInput(userBodies[0], msg);
   if (userBodies.length === DUO_BODIES) {
     if (msg.b && typeof msg.b === "object") {
       applyBodyInput(userBodies[1], msg.b);
     } else {
-      userBodies[1].ix = 0;
-      userBodies[1].iy = 0;
+      clearBodyInput(userBodies[1]);
     }
   }
 }
@@ -1682,6 +1335,9 @@ function handleMessage(ws, msg) {
       break;
     case "setMatch":
       handleSetMatch(ws, msg);
+      break;
+    case "setRules":
+      handleSetRules(ws, msg);
       break;
     case "input":
       handleInput(ws, msg);

@@ -7,6 +7,9 @@
   <meta name="description" content="PoliGol — fútbol multijugador online en tiempo real sobre una cancha poligonal. Primero a 3 goles gana.">
   <title>⚽ PoliGol</title>
   <link rel="stylesheet" href="style.css">
+  <!-- Núcleo de física compartido (v1.4 HaxBall): expone window.PoliPhysics y
+       DEBE cargarse antes que client.js. defer preserva el orden de ejecución. -->
+  <script src="physics-core.js" defer></script>
   <script src="client.js" defer></script>
 </head>
 <body>
@@ -128,6 +131,14 @@
               </select>
             </div>
           </div>
+          <!-- v1.4 E: barrida opcional por sala (default ON). Con tackles=false el
+               juego es "HaxBall puro" — el cliente oculta los controles de barrida. -->
+          <div class="config-field config-field-rule">
+            <label class="rule-toggle">
+              <input id="rule-tackles" class="opt-check" type="checkbox" checked>
+              <span class="field-label">🦵 Barrida</span>
+            </label>
+          </div>
         </div>
 
         <ul id="players-list" class="players-list" aria-label="Jugadores en la sala"></ul>
@@ -178,13 +189,13 @@
             <div class="duo-keys-col">
               <p class="duo-keys-body">Cuerpo A</p>
               <p class="duo-keys-map"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> mover</p>
-              <p class="duo-keys-map"><kbd>F</kbd> patear · <kbd>G</kbd> barrer</p>
+              <p class="duo-keys-map"><kbd>F</kbd> patear<span class="duo-keys-tackle"> · <kbd>G</kbd> barrer</span></p>
             </div>
             <div class="duo-keys-divider" aria-hidden="true"></div>
             <div class="duo-keys-col">
               <p class="duo-keys-body body-b">Cuerpo B ②</p>
               <p class="duo-keys-map"><kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd> mover</p>
-              <p class="duo-keys-map"><kbd>L</kbd> patear · <kbd>K</kbd> barrer</p>
+              <p class="duo-keys-map"><kbd>L</kbd> patear<span class="duo-keys-tackle"> · <kbd>K</kbd> barrer</span></p>
             </div>
           </div>
         </div>
@@ -251,6 +262,15 @@
           <label class="opt-label" for="opt-names">🏷️ Nombres visibles</label>
           <input id="opt-names" class="opt-check" type="checkbox" checked>
         </div>
+
+        <!-- v1.4 H: extrapolación de mundo completo. 0 = Auto (≈ medio RTT, tope
+             200 ms); >0 fuerza esos ms. Más = más responsivo, más "snap" al fallar. -->
+        <div class="opt-row">
+          <label class="opt-label" for="opt-extrapolation">⚡ Predicción</label>
+          <input id="opt-extrapolation" class="opt-range" type="range" min="0" max="200" step="10" value="0"
+                 aria-label="Extrapolación (0 = Auto)">
+        </div>
+        <p id="opt-extrapolation-label" class="relator-pack-label">Auto</p>
 
         <button id="btn-options-close" class="btn btn-primary btn-block" type="button">Listo</button>
       </div>

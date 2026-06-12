@@ -1,7 +1,41 @@
 "use strict";
 
 /* ============================================================
- * PoliGol — cliente v1.2 (vanilla JS, sin dependencias).
+ * PoliGol — cliente v1.4 (vanilla JS, sin dependencias).
+ *
+ * v1.4 — FÍSICA ESTILO HAXBALL (SPEC v1.4, PISA la física previa):
+ *   física         — window.PoliPhysics (physics-core.js, cargado por index.html
+ *                    ANTES de client.js): ÚNICA fuente de la física. El cliente NO
+ *                    redefine fórmulas/constantes — usa buildArena / stepWorld /
+ *                    goalCheck / makeBody / makeBall. Se ELIMINÓ la sim local vieja
+ *                    (simSelfStep, dribble assist, kick direccional, constantes
+ *                    duplicadas).
+ *   extrapolación  — MUNDO COMPLETO (SPEC H): se mantiene el último snapshot
+ *                    autoritativo (baseState) y cada frame se clona y se corre
+ *                    stepWorld `ext` ticks aplicando los inputs reales propios y el
+ *                    último input (neutro) de los rivales; la pelota se simula con
+ *                    todos (tu kick la mueve YA). ext = clamp(round(RTT/2/16.67)+1,
+ *                    1, 12), configurable con #opt-extrapolation (Auto / 0–200 ms;
+ *                    0 = interpolación del pasado). Reconciliación POR DISCO (pelota
+ *                    incluida): offset que decae ~120 ms, snap si error > 60 u.
+ *   kick MANTENIDO — estado mantenido en TODOS los esquemas (SPEC J): teclado
+ *                    Espacio/J (no-duo) y F/L (duo) mantenidos; táctil botón ⚽
+ *                    mantenido mientras el dedo está sobre él; táctil duo: dedo en
+ *                    la zona sin arrastrar = kick mantenido, arrastrar = mover.
+ *                    Input inmediato al apretar Y al soltar (flanco de bajada).
+ *   barrida        — opcional por sala (rules.tackles): #rule-tackles (host). Si
+ *                    está off, se ocultan botón/leyendas de barrida. Tackle edge.
+ *   render         — postes (discos claros r8) desde la geometría del núcleo;
+ *                    indicador de kick armado (aro/tinte) en el cuerpo propio;
+ *                    pelota/cuerpos con las velocidades nuevas (u/tick).
+ *   state v1.4     — u/tick 2 decimales, ka/kc(ticks)/kh por cuerpo propio, lt en
+ *                    la pelota; eventos {type:"kicked"}; feedback local inmediato.
+ *
+ * Se CONSERVA todo lo de v1.3: modos ffa/1v1/2v2/duo, objetivo goles/tiempo, gol de
+ * oro, estadios, salas públicas por push, relator + packs de voz, métricas/ping,
+ * scoreboard por equipo, botines/halos A·B y "②", joysticks dinámicos, etc.
+ *
+ * --- Historial (v1.2/v1.3, la física quedó reemplazada por v1.4) ---
  * ETAPA 1 v1.2 — PREDICCIÓN, NETCODE Y SALAS (SPEC A/C/F):
  *   predicción     — simulación local del PROPIO jugador idéntica al server
  *                    (ACCEL 1600 / FRICTION 7.5 / MAX_SPEED 230 + confinamiento
@@ -65,38 +99,49 @@
  *   En modos NO-duo todo queda exactamente como v1.2.
  * ============================================================ */
 
-/* ================= Constantes compartidas (SPEC, = server.js) ================= */
-const R = 380;              // circunradio del polígono (unidades de mundo)
-const PLAYER_R = 14;        // radio del jugador
-const BALL_R = 10;          // radio de la pelota
-const GOAL_W = 112;         // ancho del arco
-const WIN_SCORE = 3;        // puntaje objetivo
-const RECT_W = 480;         // half-extent horizontal para n = 2
-const RECT_H = 290;         // half-extent vertical para n = 2
-// v1.2 (SPEC B): la PREDICCIÓN exige estos valores IDÉNTICOS a server.js.
-const ACCEL = 1600;         // u/s² según input normalizado (v1.2: antes 1400)
-const MAX_SPEED = 230;      // u/s velocidad máxima del jugador
-const FRICTION = 7.5;       // damping exponencial sin input (v1.2: antes 6)
-const SLIDE_SPEED = 320;    // velocidad fija durante la barrida (v1.1)
-const KICK_RANGE = 44;      // alcance de la patada (v1.2: antes 36) — feedback local
-const KICK_COOLDOWN = 0.35; // s (SPEC) — cooldown LOCAL del feedback de patada
-const TACKLE_COOLDOWN = 1.6; // s — solo para feedback visual del botón táctil
+/* ================= Núcleo de física compartido (v1.4 HaxBall) =================
+ * window.PoliPhysics (physics-core.js, cargado por index.html ANTES de este
+ * script). Es la ÚNICA fuente de la física: el cliente NO redefine fórmulas ni
+ * constantes — usa buildArena / stepWorld / goalCheck / makeBody / makeBall y las
+ * constantes (PLAYER_R, BALL_R, R, GOAL_W, KICK_REACH, etc.). La extrapolación de
+ * mundo completo (SPEC v1.4 H) corre stepWorld idéntico al server. */
+const PHYS = (typeof window !== "undefined" && window.PoliPhysics) || null;
+if (!PHYS) {
+  // Sin el núcleo no hay física: avisar fuerte en consola (deploy mal armado).
+  // eslint-disable-next-line no-console
+  console.error("PoliGol: physics-core.js no cargó — window.PoliPhysics ausente.");
+}
+
+/* ================= Constantes compartidas (= physics-core.js) ================= */
+// Tomadas del núcleo para que el render y los alcances coincidan con la física.
+const R = PHYS ? PHYS.R : 380;                 // circunradio del polígono (u de mundo)
+const PLAYER_R = PHYS ? PHYS.PLAYER_R : 15;    // radio del jugador (v1.4: 15)
+const BALL_R = PHYS ? PHYS.BALL_R : 10;        // radio de la pelota
+const GOAL_W = PHYS ? PHYS.GOAL_W : 112;       // ancho del arco
+const RECT_W = PHYS ? PHYS.RECT_W : 480;       // half-extent horizontal para n = 2
+const RECT_H = PHYS ? PHYS.RECT_H : 290;       // half-extent vertical para n = 2
+const POST_R = PHYS ? PHYS.POST_R : 8;         // radio del poste (render de palos)
+const KICK_REACH = PHYS ? PHYS.KICK_REACH : 4; // alcance del kick: dist − BALL_R − PLAYER_R < esto
+const WIN_SCORE = 3;        // puntaje objetivo por defecto (target=goals)
 
 /* ======================= Constantes propias del cliente ======================= */
 const WORLD_MARGIN = 70;    // margen alrededor del bounding del polígono (SPEC render)
 const JOY_RADIUS = 38;      // px de recorrido máximo del stick del joystick
 const ROOM_NAME_MAX = 24;   // largo máximo del nombre de sala (SPEC)
-// Netcode v1.2 (SPEC A)
+// Netcode v1.2 → v1.4 (SPEC A/H)
 const INPUT_MIN_GAP_MS = 1000 / 60; // cap de 60 mensajes de input por segundo
 const KEEPALIVE_MS = 50;    // keepalive de input a 20 Hz mientras se juega
 const PING_MS = 2000;       // ping cada 2 s → #ping-indicator
+// v1.4 H: reconciliación por disco. El offset de corrección decae ~120 ms; un
+// error enorme se resuelve con snap directo (> CORR_SNAP, ahora 60 u por SPEC H).
 const CORR_DECAY = 25;      // 1/s: el offset de corrección decae a ~5% en 120 ms
-const CORR_SNAP = 80;       // u: corrección mayor que esto ⇒ snap directo
-const INTERP_MIN = 50;      // ms — piso del delay adaptativo de interpolación
-const INTERP_MAX = 160;     // ms — techo del delay adaptativo
+const CORR_SNAP = 60;       // u: corrección mayor que esto ⇒ snap directo (SPEC v1.4 H)
+const TICK_MS = 1000 / 60;  // duración de un tick (16.67 ms) — extrapolación adaptativa
+const EXT_MAX = 12;         // tope de ticks de extrapolación (≈ 200 ms, SPEC v1.4 H)
+const INTERP_MIN = 50;      // ms — piso del delay adaptativo (modo ext = 0)
+const INTERP_MAX = 160;     // ms — techo del delay adaptativo (modo ext = 0)
 const ARRIVALS_WINDOW = 20; // ~20 llegadas de snapshots para snapInterval + jitter
 const SNAP_GAP_CAP = 400;   // ms: un gap outlier (pestaña oculta) no rompe la media
-const PENDING_MAX = 240;    // tope de pendingInputs (~4 s) si el server deja de ackear
 const PROFILE_KEY = "poligol.profile";   // localStorage: { name, country }
 const SETTINGS_KEY = "poligol.settings"; // localStorage: { sound, relator, fx, vibration, names }
 // v1.3 (SPEC C) — gestos táctiles del modo duo
@@ -197,6 +242,7 @@ const lobbyCountdown = $("lobby-countdown");       // v1.1
 // host pueda configurarlo igual; si existen en el HTML se usan tal cual.
 let matchTargetSelect = $("match-target-select"); // Goles | Tiempo
 let matchValueSelect = $("match-value-select");   // values según target (whitelists)
+let ruleTacklesCheck = $("rule-tackles");         // v1.4 E: barrida on/off (host)
 (function ensureMatchSelects() {
   const cfgBox = document.querySelector(".lobby-config");
   if (!cfgBox) return;
@@ -233,6 +279,24 @@ let matchValueSelect = $("match-value-select");   // values según target (white
     field.append(lab, matchValueSelect);
     cfgBox.appendChild(field);
   }
+  // v1.4 E: checkbox de barrida si el HTML no lo trae (mismo markup que el opt-check).
+  if (!ruleTacklesCheck) {
+    const field = document.createElement("div");
+    field.className = "config-field config-field-rule";
+    const lab = document.createElement("label");
+    lab.className = "rule-toggle";
+    ruleTacklesCheck = document.createElement("input");
+    ruleTacklesCheck.id = "rule-tackles";
+    ruleTacklesCheck.className = "opt-check";
+    ruleTacklesCheck.type = "checkbox";
+    ruleTacklesCheck.checked = true;
+    const span = document.createElement("span");
+    span.className = "field-label";
+    span.textContent = "🦵 Barrida";
+    lab.append(ruleTacklesCheck, span);
+    field.appendChild(lab);
+    cfgBox.appendChild(field);
+  }
 })();
 // Juego
 const canvas = $("game-canvas");
@@ -254,6 +318,8 @@ const optRelator = $("opt-relator");               // v1.1 (checkbox)
 const optFx = $("opt-fx");                         // v1.1 (select low/high)
 const optVibration = $("opt-vibration");           // v1.1 (checkbox)
 const optNames = $("opt-names");                   // v1.1 (checkbox)
+const optExtrapolation = $("opt-extrapolation");   // v1.4 H (range 0–200 ms, 0 = Auto)
+const optExtrapolationLabel = $("opt-extrapolation-label"); // v1.4 H (texto Auto/N ms)
 const btnOptionsClose = $("btn-options-close");    // v1.1
 const relatorPackLabel = $("relator-pack-label");  // v1.2 (SPEC D): pack activo o "Voz sintética"
 // Contenedores v1 (pueden cambiar en el HTML v1.1: usar con guardas)
@@ -263,7 +329,11 @@ const lobbyActions = document.querySelector(".lobby-actions");
 const ctx = canvas.getContext("2d");
 
 /* =========================== Settings (poligol.settings) =========================== */
-const DEFAULT_SETTINGS = { sound: 100, relator: true, fx: "high", vibration: true, names: true };
+// v1.4 H: `extrapolation` = ms de extrapolación forzados, o 0 = "Auto" (adaptativo
+// por RTT). #opt-extrapolation (slider 0–200 ms) lo edita.
+const DEFAULT_SETTINGS = {
+  sound: 100, relator: true, fx: "high", vibration: true, names: true, extrapolation: 0,
+};
 
 function loadSettings() {
   const out = Object.assign({}, DEFAULT_SETTINGS);
@@ -279,6 +349,9 @@ function loadSettings() {
         if (s.fx === "low" || s.fx === "high") out.fx = s.fx;
         if (typeof s.vibration === "boolean") out.vibration = s.vibration;
         if (typeof s.names === "boolean") out.names = s.names;
+        if (typeof s.extrapolation === "number" && isFinite(s.extrapolation)) {
+          out.extrapolation = Math.max(0, Math.min(200, Math.round(s.extrapolation / 10) * 10));
+        }
       }
     }
   } catch (err) {
@@ -307,7 +380,16 @@ function syncSettingsUI() {
   if (optFx) optFx.value = settings.fx;
   if (optVibration) optVibration.checked = settings.vibration;
   if (optNames) optNames.checked = settings.names;
+  if (optExtrapolation) optExtrapolation.value = String(settings.extrapolation);
+  updateExtrapolationLabel(); // v1.4 H: "Auto" / "N ms"
   updateRelatorPackLabel(); // v1.2 (SPEC D): nombre del pack o "Voz sintética"
+}
+
+// Etiqueta del slider de extrapolación (#opt-extrapolation-label): 0 = "Auto".
+function updateExtrapolationLabel() {
+  if (!optExtrapolationLabel) return;
+  const v = settings.extrapolation;
+  optExtrapolationLabel.textContent = v > 0 ? v + " ms" : "Auto (≈ ½ RTT)";
 }
 
 function openOptions() {
@@ -349,6 +431,12 @@ on(optVibration, "change", () => {
 });
 on(optNames, "change", () => {
   settings.names = !!optNames.checked;
+  saveSettings();
+});
+on(optExtrapolation, "input", () => {
+  const v = parseInt(optExtrapolation.value, 10);
+  settings.extrapolation = isFinite(v) ? Math.max(0, Math.min(200, v)) : 0;
+  updateExtrapolationLabel();
   saveSettings();
 });
 
@@ -403,31 +491,45 @@ let scoreItems = [];       // team index → {root, valEl, value}
 let overlayTimers = [];
 let copiedTimer = 0;
 let inputTimer = 0;        // keepalive de input a 20 Hz (v1.2)
-// v1.3: cooldowns LOCALES de feedback POR CUERPO propio (índice = slot; en
-// modos no-duo solo se usa el slot 0, exactamente como los escalares v1.2).
+// v1.4: cooldown LOCAL del feedback de barrida POR CUERPO propio (índice = slot;
+// en no-duo solo se usa el slot 0). El kick ya no necesita cooldown local: el
+// kickArmed del modelo (mantener) evita el doble-disparo sin gating de tiempo.
 let tackleCdUntil = [0, 0];
-let kickCdUntil = [0, 0];  // el kc del snapshot llega tarde ~interpDelay+RTT/2
+const TACKLE_COOLDOWN_MS = (PHYS ? PHYS.TACKLE_COOLDOWN_TICKS : 96) * TICK_MS; // ≈ 1.6 s
 let lobbyCountdownTimer = 0;
 
-// Netcode v1.2 (SPEC A) — predicción + reconciliación. v1.3 (SPEC B): se
-// generaliza a N cuerpos propios (en duo, 2) con la MISMA simulación local.
+// Netcode v1.4 (SPEC H) — EXTRAPOLACIÓN DE MUNDO COMPLETO.
+//   El cliente mantiene `baseState` = último snapshot autoritativo del server como
+//   un estado de stepWorld real (bodies[] + ball, en u/tick). Cada frame clona ese
+//   estado y corre stepWorld hacia adelante `ext` ticks aplicando: los inputs
+//   REALES de los cuerpos propios y el último input conocido de los rivales. La
+//   pelota se simula con todos (tu kick la mueve YA). El resultado se renderiza.
+//   Reconciliación POR DISCO (pelota incluida): un offset visual que decae ~120 ms;
+//   snap directo si el error > CORR_SNAP (60 u).
 let inputSeq = 0;          // seq incremental por conexión (el primer input manda 1)
-let lastSentA = { mx: 0, my: 0 }; // último movimiento enviado del cuerpo A (detección de cambio)
-let lastSentB = { mx: 0, my: 0 }; // ídem cuerpo B (solo relevante en duo)
+let lastSentA = { mx: 0, my: 0, kick: false }; // último input enviado del cuerpo A
+let lastSentB = { mx: 0, my: 0, kick: false }; // ídem cuerpo B (solo relevante en duo)
 let lastInputSendT = -1e9; // performance.now() del último input enviado (cap 60/s)
-// Acciones latcheadas si el cap pospuso el envío (índice = slot del cuerpo).
-const queuedActs = [
-  { kick: false, tackle: false },
-  { kick: false, tackle: false },
-];
-let pendingInputs = [];    // [{seq, a:{mx,my}, b:{mx,my}, dt}] aún sin ack del server
-// Estado predicho POR CUERPO PROPIO (v1.3): {id, slot, pred, corrX, corrY};
-// pred = {x,y,vx,vy,fx,fy,stun,slide,sdx,sdy}; render propio = pred + corr
-// (el offset decae a 0 en ~120 ms; snap directo si > CORR_SNAP).
-let selfPred = [];
-let lastPaused = false;    // último paused del server (congela la predicción)
+// Tackle latcheado si el cap pospuso el envío (edge-trigger, índice = slot). El
+// kick NO se latchea: es estado MANTENIDO (se lee en vivo de los controles).
+const queuedTackle = [false, false];
+
+// `baseState` (mundo autoritativo). Cada cuerpo: estado completo de makeBody +
+// `kh` (kickHeld efectivo del server). La pelota lleva lastTouch. `baseArena` es
+// la cancha del partido (buildArena con su estadio). `extWorld` es el estado
+// extrapolado del último frame, para render y para medir la corrección por disco.
+let baseState = null;      // { bodies:[...], ball:{...}, rules:{tackles} } o null
+let baseArena = null;      // salida de PoliPhysics.buildArena(n, stadium)
+let extWorld = null;       // último mundo extrapolado renderizado (clon de baseState)
+// Offset de corrección por disco (id → {dx,dy}); render = extrapolado + offset, el
+// offset decae a 0 en ~120 ms (anti-snap). La pelota usa la clave "__ball__".
+const dragOffset = new Map();
+const BALL_KEY = "__ball__";
+
+let lastPaused = false;    // último paused del server (congela la extrapolación)
 let snapArrivals = [];     // llegadas de snapshots (ventana ~20) → delay adaptativo
-let interpDelay = 100;     // ms: clamp(snapInterval*1.5 + jitter, 50, 160) (SPEC A)
+let interpDelay = 100;     // ms: clamp(snapInterval*1.5 + jitter, 50, 160) (modo ext=0)
+let lastRttMs = 0;         // último RTT medido (ping/pong) → ticks de extrapolación
 let pingTimer = 0;         // ping cada 2 s mientras la conexión esté abierta
 let goalStreak = { team: null, count: 0 }; // racha para el relator (etapa 2)
 
@@ -465,11 +567,6 @@ const joys = [makeJoy(), makeJoy()];
 // v1.3: helpers de modo duo y cuerpos propios.
 function isDuo() {
   return !!(match && match.mode === "duo");
-}
-
-function selfBody(slot) {
-  for (const sb of selfPred) if (sb.slot === slot) return sb;
-  return null;
 }
 
 // Nombre del USUARIO dueño de un cuerpo (v1.3: relator, overlays y scoreboard
@@ -512,7 +609,6 @@ function connectWs() {
   ws = new WebSocket(wsUrl());
   // seq de input por CONEXIÓN (SPEC A): cada socket nuevo arranca de cero.
   inputSeq = 0;
-  pendingInputs = [];
   ws.onopen = () => {
     for (const item of wsQueue) ws.send(item.data);
     wsQueue = [];
@@ -664,6 +760,7 @@ function stopPing() {
 function handlePong(msg) {
   if (typeof msg.t !== "number" || !isFinite(msg.t)) return;
   const rtt = Math.max(0, performance.now() - msg.t);
+  lastRttMs = rtt; // v1.4 H: alimenta los ticks de extrapolación adaptativos
   if (!pingIndicator) return;
   pingIndicator.textContent = Math.round(rtt) + " ms";
   pingIndicator.classList.toggle("ping-good", rtt < 80);
@@ -726,7 +823,6 @@ function goHome(sendLeave) {
   feetState.clear();
   relatorStop();
   resetPrediction();
-  selfPred = [];
   hideMatchClock();          // v1.3
   hideDuoKeysHint();         // v1.3
   updateTouchButtonsVisibility(false); // v1.3: ⚽/🦵 vuelven fuera de duo
@@ -888,6 +984,7 @@ function handleRooms(msg) {
     list.map((r) => [
       r.code, r.roomName, r.hostName, r.count, r.max, r.mode, r.stadium,
       r.target, r.value, // v1.3: el chip de objetivo también invalida el cache
+      r.tackles, // v1.4: el chip "sin barrida" también invalida el cache
       r.code === roomCode, // el badge "Tu sala" también invalida el cache de render
     ])
   );
@@ -945,6 +1042,13 @@ function renderRooms(list) {
       chipMatch.textContent = matchChipLabel(r.target, r.value);
       meta.appendChild(chipMatch);
     }
+    // v1.4 (SPEC E): si la sala desactivó la barrida, chip "HaxBall puro".
+    if (r.tackles === false) {
+      const chipPure = document.createElement("span");
+      chipPure.className = "room-chip room-chip-pure";
+      chipPure.textContent = "Sin barrida";
+      meta.appendChild(chipPure);
+    }
     info.appendChild(meta);
 
     const joinBtn = document.createElement("button");
@@ -983,7 +1087,6 @@ function handleLobby(msg) {
     feetState.clear();
     relatorStop();
     resetPrediction();
-    selfPred = [];
     hideMatchClock();          // v1.3
     hideDuoKeysHint();         // v1.3
     updateTouchButtonsVisibility(false); // v1.3
@@ -1001,6 +1104,8 @@ function handleLobby(msg) {
     stadium: typeof msg.stadium === "string" ? msg.stadium : "clasico",
     target,
     value: matchValueOk(target, msg.value) ? msg.value : matchDefaultValue(target),
+    // v1.4 E: barrida opcional por sala (default true si el server no lo manda).
+    tackles: msg.tackles !== false,
     players: Array.isArray(msg.players) ? msg.players : [],
   };
   roomCode = lobby.code;
@@ -1070,6 +1175,11 @@ function renderLobby(notice) {
   if (matchValueSelect) {
     populateMatchValues(lobby.target, lobby.value);
     matchValueSelect.disabled = !meHost;
+  }
+  // v1.4 E: checkbox de barrida — host editable, no-host solo lectura.
+  if (ruleTacklesCheck) {
+    ruleTacklesCheck.checked = lobby.tackles !== false;
+    ruleTacklesCheck.disabled = !meHost;
   }
   renderLobbyMatchChip(); // chip "a N goles" / "N min" también en el lobby
 
@@ -1230,6 +1340,12 @@ on(matchValueSelect, "change", () => {
   wsSend({ type: "setMatch", target, value });
 });
 
+// v1.4 E: barrida on/off (solo host, solo lobby).
+on(ruleTacklesCheck, "change", () => {
+  if (phase !== "lobby" || hostId !== myId) return;
+  wsSend({ type: "setRules", tackles: !!ruleTacklesCheck.checked });
+});
+
 on(btnLeave, "click", () => goHome(true));
 
 /* -------------------- Countdown de auto-arranque (#lobby-countdown) -------------------- */
@@ -1331,49 +1447,30 @@ function legacyCopy(text) {
   return ok;
 }
 
-/* ============================ Geometría (= server) ============================ */
-function buildGeometry(n) {
-  let verts;
-  let walls;
+/* ===================== Geometría (= núcleo PoliPhysics) =====================
+ * La geometría viene del núcleo compartido (buildArena) para que las colisiones
+ * de la extrapolación y el render coincidan exactamente con el server. Acá solo
+ * se derivan los VÉRTICES del polígono (para el clip del césped) y el bounding,
+ * a partir de las mismas fórmulas del SPEC. arena.goals trae la boca de cada arco
+ * (con su equipo) y arena.posts los palos — el render los usa directamente. */
+function polygonVerts(n) {
   if (n === 2) {
-    verts = [
+    return [
       { x: -RECT_W, y: -RECT_H },
       { x: RECT_W, y: -RECT_H },
       { x: RECT_W, y: RECT_H },
       { x: -RECT_W, y: RECT_H },
     ];
-    walls = [
-      { cx: -RECT_W, cy: 0, dx: 0, dy: 1, nx: -1, ny: 0, half: RECT_H, goal: 0 },
-      { cx: RECT_W, cy: 0, dx: 0, dy: 1, nx: 1, ny: 0, half: RECT_H, goal: 1 },
-      { cx: 0, cy: -RECT_H, dx: 1, dy: 0, nx: 0, ny: -1, half: RECT_W, goal: null },
-      { cx: 0, cy: RECT_H, dx: 1, dy: 0, nx: 0, ny: 1, half: RECT_W, goal: null },
-    ];
-  } else {
-    verts = [];
-    for (let k = 0; k < n; k++) {
-      const a = -Math.PI / 2 + (2 * Math.PI * k) / n;
-      verts.push({ x: R * Math.cos(a), y: R * Math.sin(a) });
-    }
-    walls = [];
-    for (let k = 0; k < n; k++) {
-      const a = verts[k];
-      const b = verts[(k + 1) % n];
-      const mx = (a.x + b.x) / 2;
-      const my = (a.y + b.y) / 2;
-      const len = Math.hypot(b.x - a.x, b.y - a.y);
-      const ml = Math.hypot(mx, my);
-      walls.push({
-        cx: mx,
-        cy: my,
-        dx: (b.x - a.x) / len,
-        dy: (b.y - a.y) / len,
-        nx: mx / ml,
-        ny: my / ml,
-        half: len / 2,
-        goal: k,
-      });
-    }
   }
+  const verts = [];
+  for (let k = 0; k < n; k++) {
+    const a = -Math.PI / 2 + (2 * Math.PI * k) / n;
+    verts.push({ x: R * Math.cos(a), y: R * Math.sin(a) });
+  }
+  return verts;
+}
+
+function vertsBounds(verts) {
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -1384,7 +1481,7 @@ function buildGeometry(n) {
     minY = Math.min(minY, v.y);
     maxY = Math.max(maxY, v.y);
   }
-  return { verts, walls, bounds: { minX, maxX, minY, maxY } };
+  return { minX, maxX, minY, maxY };
 }
 
 function buildFieldPath(verts) {
@@ -1408,9 +1505,15 @@ function handleStart(msg) {
   loadVoicePack(); // al entrar al juego, una sola vez (cache en memoria, SPEC D)
   const cfg = msg.config;
   if (!cfg || !Array.isArray(cfg.players) || !Array.isArray(cfg.teams)) return;
+  if (!PHYS) return; // sin núcleo no hay física (error ya logueado al cargar)
   const n = cfg.teams.length; // n = cantidad de EQUIPOS (v1.1); arco k = equipo k
   if (n < 2) return;
-  const geo = buildGeometry(n);
+  const stadiumStart = typeof cfg.stadium === "string" ? cfg.stadium : "clasico";
+  // Cancha del núcleo (walls/posts/goals/spawns + phys del estadio). MISMA que el
+  // server arma con buildArena(n, stadium): la extrapolación corre sobre ella.
+  baseArena = PHYS.buildArena(n, stadiumStart);
+  const verts = polygonVerts(n);
+  const bounds = vertsBounds(verts);
 
   // v1.3 (SPEC A): cada entrada de players es un CUERPO {id,name,country,team,
   // owner,slot}. En modos no-duo el server manda slot 0 y owner = el usuario
@@ -1490,15 +1593,26 @@ function handleStart(msg) {
     target,        // v1.3 (D): "goals" | "time"
     value,         // v1.3 (D): whitelisted
     golden: false, // v1.3 (D): true tras {type:"golden"} (GOL DE ORO)
-    walls: geo.walls,
-    verts: geo.verts,
-    bounds: geo.bounds,
-    fieldPath: buildFieldPath(geo.verts),
-    phys: clientStadiumPhys(stadium), // accel/friction efectivas (= server, v1.2)
+    // v1.4 E: barrida según la sala (del config si viniera; si no, del último
+    // lobby; default true). La extrapolación pasa esto como rules a stepWorld.
+    tackles:
+      cfg.tackles !== undefined
+        ? cfg.tackles !== false
+        : lobby
+          ? lobby.tackles !== false
+          : true,
+    arena: baseArena,          // v1.4: cancha del núcleo (walls/posts/goals/spawns)
+    goals: baseArena.goals,    // boca de cada arco (cx,cy,nx,ny,dx,dy,team)
+    posts: baseArena.posts,    // palos (x,y,goal) — render de postes
+    verts: verts,
+    bounds: bounds,
+    fieldPath: buildFieldPath(verts),
   };
-  // Predicción ×N (SPEC B): una entrada por cuerpo propio; el primer state la
-  // inicializa desde el estado autoritativo (pred null hasta entonces).
-  selfPred = myBodies.map((b) => ({ id: b.id, slot: b.slot, pred: null, corrX: 0, corrY: 0 }));
+  // v1.4 H: estado autoritativo base para la extrapolación de mundo completo.
+  // Se inicializa al primer `state`; hasta entonces null (sin extrapolar).
+  baseState = null;
+  extWorld = null;
+  dragOffset.clear();
   snaps = [];
   resetPrediction();
   snapArrivals = [];
@@ -1511,7 +1625,10 @@ function handleStart(msg) {
   ballSpin = 0;
   ended = false;
   tackleCdUntil = [0, 0];
-  kickCdUntil = [0, 0];
+  kickHoldSources[0].clear();
+  kickHoldSources[1].clear();
+  lastSentA = { mx: 0, my: 0, kick: false };
+  lastSentB = { mx: 0, my: 0, kick: false };
   goalStreak = { team: null, count: 0 };
   feetState.clear();
   dustFx = [];
@@ -1550,8 +1667,8 @@ function handleState(msg) {
   if (!match || phase !== "game") return;
   const t = performance.now();
 
-  // Delay adaptativo (SPEC A): snapInterval medio + jitter (desvío estándar) de
-  // las últimas ~20 llegadas → interpDelay = clamp(media*1.5 + jitter, 50, 160).
+  // Delay adaptativo (SPEC A, usado solo en modo ext=0): snapInterval medio +
+  // jitter de las últimas ~20 llegadas → clamp(media*1.5 + jitter, 50, 160).
   snapArrivals.push(t);
   if (snapArrivals.length > ARRIVALS_WINDOW + 1) snapArrivals.shift();
   if (snapArrivals.length >= 3) {
@@ -1568,14 +1685,12 @@ function handleState(msg) {
     interpDelay = Math.min(INTERP_MAX, Math.max(INTERP_MIN, mean * 1.5 + jitter));
   }
 
-  // Normalización v1.2 (SPEC E): el server omite campos en 0 (stun/kc/slide) y
-  // redondea a 1 decimal; el cliente asume 0 ante cualquier campo ausente.
+  // v1.4 I: state en u/tick, 2 decimales; el server omite campos en 0
+  // (stun/kc/slide/ka/kh/lt). El cliente asume 0/false ante un campo ausente.
   const num = (v) => (typeof v === "number" && isFinite(v) ? v : 0);
-  // ball SIEMPRE objeto (nunca null): un state sin ball asume 0 como cualquier
-  // otro campo ausente (SPEC v1.2 "campos ausentes = 0") — sampleState interpola
-  // s0.ball/s1.ball sin guard y un null en el buffer tiraría TypeError por frame.
   const mb = msg.ball || {};
-  const ball = { x: num(mb.x), y: num(mb.y), vx: num(mb.vx), vy: num(mb.vy) };
+  // Snapshot "fino" para SFX/eventos y para el buffer de interpolación (ext=0).
+  const ball = { x: num(mb.x), y: num(mb.y), vx: num(mb.vx), vy: num(mb.vy), lt: mb.lt };
   const pm = new Map();
   if (Array.isArray(msg.players)) {
     for (const p of msg.players) {
@@ -1587,46 +1702,56 @@ function handleState(msg) {
         vy: num(p.vy),
         fx: num(p.fx),
         fy: num(p.fy),
-        stun: num(p.stun),
-        kc: num(p.kc),
-        slide: num(p.slide),
-        // iq = último seq de input aplicado por el server al PROPIO jugador.
+        stun: num(p.stun),     // v1.4: en TICKS restantes
+        kc: num(p.kc),         // v1.4: cooldown de kick en TICKS restantes (entero)
+        slide: num(p.slide),   // v1.4: en TICKS restantes
+        ka: p.ka !== undefined ? !!p.ka : true,  // kickArmed (cuerpo propio)
+        kh: !!p.kh,            // kickHeld efectivo (cuerpo propio)
+        // iq = último seq de input aplicado por el server al USUARIO propio.
         iq: typeof p.iq === "number" && isFinite(p.iq) ? p.iq : null,
       });
     }
   }
 
-  // Detección de eventos (patada / barrida / stun) comparando con el snapshot
-  // anterior. Las acciones PROPIAS ya sonaron al presionar (feedback local v1.2):
-  // acá solo se disparan las ajenas para no duplicar SFX/anillo.
+  const paused = !!msg.paused;
+  // Eventos `kicked` del server (SPEC I): sfx/anim precisos. Los kicks de cuerpos
+  // PROPIOS ya sonaron al disparar localmente; acá solo los ajenos.
+  const kickedNow = new Set();
+  if (Array.isArray(msg.events)) {
+    for (const ev of msg.events) {
+      if (ev && ev.type === "kicked" && typeof ev.id === "string") kickedNow.add(ev.id);
+    }
+  }
+
+  // Detección de eventos comparando con el snapshot anterior (fallback si el
+  // server no manda `events`). En v1.4 el cooldown `kc` salta de 0 a 2 ticks al
+  // patear: un kc nuevo > 0 con el anterior 0 marca un kick.
   const prev = snaps[snaps.length - 1];
   if (prev) {
     for (const [id, p] of pm) {
       const q = prev.players.get(id);
       if (!q) continue;
-      // v1.3: "propio" ahora son TODOS los cuerpos del usuario (en duo, 2).
       const own = match.myBodyIds ? match.myBodyIds.has(id) : id === myId;
-      if (p.kc > q.kc + 0.05) {
+      const kickedEvt = kickedNow.has(id) || (p.kc > 0 && (q.kc || 0) <= 0);
+      if (kickedEvt) {
         if (!own) {
           ringFx.push({ x: p.x, y: p.y, t });
           sfxKick();
         }
-        // Squash de la pelota solo si la patada fue cerca de ella.
-        if (ball && Math.hypot(ball.x - p.x, ball.y - p.y) < KICK_RANGE + BALL_R + 16) {
-          lastKickT = t;
-        }
+        // Squash de la pelota si la patada fue cerca de ella (alcance real v1.4).
+        const reach = BALL_R + PLAYER_R + KICK_REACH + 8;
+        if (Math.hypot(ball.x - p.x, ball.y - p.y) < reach) lastKickT = t;
       }
       const qSlide = q.slide || 0;
-      if ((p.slide || 0) > qSlide + 0.05 && !own) sfxTackle(); // arranque del slide
-      if (p.stun > q.stun + 0.05) {
+      if ((p.slide || 0) > qSlide + 0.5 && !own) sfxTackle(); // arranque del slide
+      if (p.stun > q.stun + 0.5) {
         // Barrida que conecta: vibración si se la dieron a un cuerpo mío + relator.
         if (own) vibrate(40);
         const victim = match.byId.get(id);
-        // El que barre: el cuerpo en slide más cercano a la víctima.
         let tacklerId = null;
         let bestD = Infinity;
         for (const [oid, op] of pm) {
-          if (oid === id || (op.slide || 0) <= 0.02) continue;
+          if (oid === id || (op.slide || 0) <= 0.5) continue;
           const dd = (op.x - p.x) * (op.x - p.x) + (op.y - p.y) * (op.y - p.y);
           if (dd < bestD) {
             bestD = dd;
@@ -1634,37 +1759,51 @@ function handleState(msg) {
           }
         }
         const tackler = tacklerId ? match.byId.get(tacklerId) : null;
-        // v1.3: el relator nombra al USUARIO dueño de cada cuerpo.
         commentator("tackle", {
           name: tackler ? bodyUserName(tackler) : "",
           rival: victim ? bodyUserName(victim) : "",
         });
       }
     }
-    // Rebote contra pared (sfxBounce tiene su propio rate-limit de 90 ms).
-    if (ball && prev.ball) {
+    // Rebote contra pared/poste: la pelota invierte una componente normal. En
+    // u/tick una pelota "rápida" arranca en ~3 u/tick (= 180 u/s); umbral 3.
+    if (prev.ball) {
       const flippedX = ball.vx * prev.ball.vx < 0;
       const flippedY = ball.vy * prev.ball.vy < 0;
-      if ((flippedX || flippedY) && Math.hypot(prev.ball.vx, prev.ball.vy) > 180) {
+      if ((flippedX || flippedY) && Math.hypot(prev.ball.vx, prev.ball.vy) > 3) {
         sfxBounce();
       }
     }
   }
-  snaps.push({ t, ball, players: pm, paused: !!msg.paused });
+  snaps.push({ t, ball, players: pm, paused });
   if (snaps.length > 40) snaps.shift();
   if (Array.isArray(msg.scores)) updateScores(msg.scores);
 
-  // v1.3 (SPEC D): reloj mm:ss con state.tl (presente SOLO en target=time;
-  // en GOL DE ORO tl se omite y el reloj queda en "GOL DE ORO" pulsante).
+  // v1.3 (SPEC D): reloj mm:ss con state.tl (presente SOLO en target=time).
   if (match.golden || typeof msg.tl === "number") {
     updateMatchClock(typeof msg.tl === "number" && isFinite(msg.tl) ? msg.tl : null);
   }
 
-  // Predicción + reconciliación de TODOS los cuerpos propios (SPEC A / v1.3 B).
-  reconcileSelf(pm, !!msg.paused);
-  const sbA = selfBody(0);
-  const meA = sbA ? pm.get(sbA.id) : null;
-  if (btnKick && meA) btnKick.classList.toggle("cooldown", meA.kc > 0.02);
+  // v1.4 H: reemplazar el estado base de la extrapolación por el del server, y
+  // reconciliar por disco (offset que decae ~120 ms; snap si error > 60 u).
+  rebaseWorld(pm, ball, paused);
+
+  // Feedback del cooldown de kick en el botón táctil (cuerpo A).
+  const meA = match.myBodyIds ? firstOwnSnap(pm) : null;
+  if (btnKick && meA) btnKick.classList.toggle("cooldown", meA.kc > 0);
+}
+
+// Primer snapshot de un cuerpo propio (slot 0 preferido) del Map de estado.
+function firstOwnSnap(pm) {
+  if (!match || !match.myBodyIds) return null;
+  let best = null;
+  for (const [id, p] of pm) {
+    if (!match.myBodyIds.has(id)) continue;
+    const body = match.byId.get(id);
+    if (body && body.slot === 0) return p;
+    if (!best) best = p;
+  }
+  return best;
 }
 
 function handleGoal(msg) {
@@ -2022,10 +2161,11 @@ function showDuoKeysHint() {
       duoKeysHintEl = document.createElement("div");
       duoKeysHintEl.id = "duo-keys-hint";
       duoKeysHintEl.className = "duo-keys-hint";
+      const tk = !match || match.tackles !== false;
       const a = document.createElement("div");
-      a.textContent = "① WASD mover · F patear · G barrer";
+      a.textContent = "① WASD mover · F patear (mantené)" + (tk ? " · G barrer" : "");
       const b = document.createElement("div");
-      b.textContent = "② Flechas mover · L patear · K barrer";
+      b.textContent = "② Flechas mover · L patear (mantené)" + (tk ? " · K barrer" : "");
       duoKeysHintEl.append(a, b);
       screenGame.appendChild(duoKeysHintEl);
     }
@@ -2054,11 +2194,15 @@ function hideDuoKeysHint() {
 // Además de .hidden en cada botón, se togglea .duo-mode en #touch-controls y
 // #screen-game (contrato del CSS v1.3: .duo-mode .touch-buttons{display:none}).
 function updateTouchButtonsVisibility(duo) {
+  // v1.4 E: el botón 🦵 se oculta también si la sala desactivó la barrida.
+  const tacklesOn = !match || match.tackles !== false;
   if (btnKick) btnKick.classList.toggle("hidden", !!duo);
-  if (btnTackle) btnTackle.classList.toggle("hidden", !!duo);
+  if (btnTackle) btnTackle.classList.toggle("hidden", !!duo || !tacklesOn);
   const touchControls = $("touch-controls");
   if (touchControls) touchControls.classList.toggle("duo-mode", !!duo);
   if (screenGame) screenGame.classList.toggle("duo-mode", !!duo);
+  // Clase global para que el CSS oculte leyendas/hints de barrida si tackles=off.
+  if (screenGame) screenGame.classList.toggle("no-tackles", !tacklesOn);
 }
 
 /* =================================== Toasts ================================== */
@@ -2109,34 +2253,70 @@ function keyVec(set) {
 // Input de movimiento actual del cuerpo `slot` (0 = A, 1 = B; B solo en duo).
 function currentInputFor(slot) {
   const j = joys[slot];
-  if (j.active) return { mx: j.mx, my: j.my };
+  if (j.active && j.moved) return { mx: j.mx, my: j.my };
+  if (j.active && !isDuo()) return { mx: j.mx, my: j.my };
   if (isDuo()) return keyVec(slot === 1 ? KEYSET_B : KEYSET_A);
   return keyVec(KEYSET_ALL);
 }
 
-/* ---------------------- Envío de input v1.2/v1.3 (SPEC A/B) ----------------------
+/* ---------------------- KICK MANTENIDO (SPEC v1.4 I/J) ----------------------
+ * El kick pasa a ser ESTADO MANTENIDO (true mientras la tecla/botón/dedo está
+ * apretado), no un edge-trigger. Por cuerpo (slot) se mantiene un set de
+ * "fuentes" que lo tienen apretado (teclado, botón, zona táctil): el kick está
+ * MANTENIDO si hay alguna fuente activa. Esto convive con multitouch (varios
+ * dedos) y con teclado+botón a la vez sin contar de menos al soltar uno solo. */
+const kickHoldSources = [new Set(), new Set()];
+
+function kickHeldFor(slot) {
+  return kickHoldSources[slot === 1 ? 1 : 0].size > 0;
+}
+
+// Marca/desmarca una fuente de kick mantenido para un cuerpo y manda input
+// inmediato en AMBOS flancos (apretar Y soltar, SPEC v1.4 I). Dispara feedback
+// local solo en el flanco de SUBIDA real (cuando arranca a mantener).
+function setKickHold(slot, source, held) {
+  if (phase !== "game" || ended) return;
+  const s = slot === 1 ? 1 : 0;
+  const set = kickHoldSources[s];
+  const before = set.size > 0;
+  if (held) set.add(source);
+  else set.delete(source);
+  const after = set.size > 0;
+  if (before === after) return;     // sin cambio efectivo del estado mantenido
+  if (after) localKickFeedback(s);  // flanco de subida: pop/anillo inmediatos
+  flushInput(true);                 // input inmediato al apretar Y al soltar
+}
+
+// Suelta TODAS las fuentes de kick de un cuerpo (blur, fin de partido, reset).
+function releaseAllKick(slot) {
+  const s = slot === 1 ? 1 : 0;
+  if (kickHoldSources[s].size) {
+    kickHoldSources[s].clear();
+    flushInput(true);
+  }
+}
+
+/* ---------------------- Envío de input (SPEC A/B, v1.4 I) ----------------------
  * Único punto de salida de {type:"input", seq, mx, my, kick, tackle[, b]}:
- * - INMEDIATO al cambiar el vector de movimiento (de cualquier cuerpo) o al
- *   presionar kick/tackle, con cap de 60 msgs/s (INPUT_MIN_GAP_MS); si el cap
- *   pospone el envío, la acción queda latcheada (queuedActs[slot]) y el cambio
- *   lo reintenta el próximo rAF o el keepalive.
- * - keepalive a 20 Hz mientras se juega (el server necesita seq frescos).
- * - seq incremental por conexión (arranca en 1); kick/tackle edge-trigger.
- * - v1.3 duo: UN solo mensaje combinado — campos planos = cuerpo A (slot 0),
- *   objeto `b` = cuerpo B (slot 1), un solo seq para ambos. En no-duo no se
- *   manda `b` (idéntico a v1.2; el server lo ignoraría igual). */
+ * - INMEDIATO al cambiar el movimiento, al apretar/soltar kick (mantenido) o al
+ *   presionar tackle (edge), con cap de 60 msgs/s; el keepalive 20 Hz reintenta.
+ * - kick = ESTADO MANTENIDO (kickHeldFor); tackle = edge (queuedTackle, se
+ *   consume al enviarse). seq incremental por conexión (arranca en 1).
+ * - duo: UN solo mensaje — campos planos = cuerpo A (slot 0), objeto `b` = cuerpo
+ *   B (slot 1), un solo seq. En no-duo no se manda `b`. */
 function flushInput(force) {
   if (phase !== "game" || ended || !ws || ws.readyState !== WebSocket.OPEN) return;
   const duo = isDuo();
   const a = currentInputFor(0);
   const b = duo ? currentInputFor(1) : null;
-  const qa = queuedActs[0];
-  const qb = queuedActs[1];
+  const ka = kickHeldFor(0);
+  const kb = duo ? kickHeldFor(1) : false;
   const changed =
     a.mx !== lastSentA.mx ||
     a.my !== lastSentA.my ||
-    (duo && (b.mx !== lastSentB.mx || b.my !== lastSentB.my));
-  const hasAct = qa.kick || qa.tackle || (duo && (qb.kick || qb.tackle));
+    ka !== lastSentA.kick ||
+    (duo && (b.mx !== lastSentB.mx || b.my !== lastSentB.my || kb !== lastSentB.kick));
+  const hasAct = queuedTackle[0] || (duo && queuedTackle[1]);
   if (!force && !changed && !hasAct) return;
   const now = performance.now();
   if (now - lastInputSendT < INPUT_MIN_GAP_MS) return; // cap 60/s
@@ -2146,73 +2326,85 @@ function flushInput(force) {
     seq: inputSeq,
     mx: a.mx,
     my: a.my,
-    kick: qa.kick,
-    tackle: qa.tackle,
+    kick: ka,                 // ESTADO MANTENIDO (v1.4)
+    tackle: queuedTackle[0],  // edge-trigger
   };
-  if (duo) msg.b = { mx: b.mx, my: b.my, kick: qb.kick, tackle: qb.tackle };
+  if (duo) msg.b = { mx: b.mx, my: b.my, kick: kb, tackle: queuedTackle[1] };
   ws.send(JSON.stringify(msg));
-  qa.kick = false;
-  qa.tackle = false;
-  qb.kick = false;
-  qb.tackle = false;
+  queuedTackle[0] = false;
+  queuedTackle[1] = false;
   lastSentA.mx = a.mx;
   lastSentA.my = a.my;
+  lastSentA.kick = ka;
   if (duo) {
     lastSentB.mx = b.mx;
     lastSentB.my = b.my;
+    lastSentB.kick = kb;
   }
   lastInputSendT = now;
 }
 
-// Feedback local INMEDIATO de la patada (SPEC A): anillo + SFX + squash al
-// presionar, sin esperar el round-trip. El server sigue siendo autoritativo
-// (con kick buffer de 160 ms); la detección de handleState saltea los cuerpos
-// propios. v1.3: POR CUERPO (slot) — cada cuerpo tiene su pred y su cooldown.
-function localKickFeedback(slot) {
-  const sb = selfBody(slot);
-  const pr = sb ? sb.pred : null;
-  if (pr && (pr.stun > 0.01 || pr.slide > 0.01)) return; // sin control: no sonar en vano
-  const now = performance.now();
-  // Cooldown LOCAL (mismo patrón que tackleCdUntil): el kc del snapshot llega
-  // ~interpDelay + RTT/2 tarde, así que dos presses dentro de esa ventana harían
-  // sonar un kick fantasma que el server va a rechazar por KICK_COOLDOWN.
-  if (now < kickCdUntil[slot]) return;
-  const last = snaps.length ? snaps[snaps.length - 1] : null;
-  const meSnap = last && sb ? last.players.get(sb.id) : null;
-  if (meSnap && meSnap.kc > 0.05) return; // todavía en cooldown conocido
-  sfxKick();
-  const px = pr ? pr.x + sb.corrX : meSnap ? meSnap.x : null;
-  const py = pr ? pr.y + sb.corrY : meSnap ? meSnap.y : null;
-  if (px !== null && py !== null) {
-    ringFx.push({ x: px, y: py, t: now });
-    // Squash de la pelota si está al alcance real de la patada (KICK_RANGE 44).
-    if (last && last.ball && Math.hypot(last.ball.x - px, last.ball.y - py) <= KICK_RANGE) {
-      lastKickT = now;
-      // La patada va a ejecutar de verdad en el server (pelota en rango): armar el
-      // cooldown local. Fuera de rango NO se arma (el server tampoco quema el kc:
-      // kick buffer 160 ms), para no silenciar un kick real posterior.
-      kickCdUntil[slot] = now + KICK_COOLDOWN * 1000;
-    }
+// Estado predicho/extrapolado más reciente de un cuerpo propio (para gatear el
+// feedback): null si todavía no hay base. Lee del extWorld del último frame.
+function ownExtState(slot) {
+  if (!extWorld || !extWorld.byId || !match || !match.myBodyIds) return null;
+  for (const pl of match.players) {
+    if (pl.slot !== slot || !match.myBodyIds.has(pl.id)) continue;
+    const e = extWorld.byId.get(pl.id);
+    if (e) return e;
   }
+  return null;
+}
+
+// Feedback local INMEDIATO de la patada (SPEC v1.4 J): pop + anillo + squash al
+// disparar localmente, sin esperar al server. Se llama en el flanco de subida del
+// kick mantenido. El server sigue siendo autoritativo; handleState saltea los
+// cuerpos propios para no duplicar el sfx.
+function localKickFeedback(slot) {
+  const base = baseState ? baseBodyOf(slot) : null;
+  if (base && (base.stun > 0 || base.slide > 0)) return; // sin control
+  const now = performance.now();
+  sfxKick();
+  const e = ownExtState(slot) || base;
+  if (!e) return;
+  ringFx.push({ x: e.x, y: e.y, t: now });
+  // Squash de la pelota si está al alcance real del kick (dist < 29 + holgura).
+  const bx = extWorld ? extWorld.ball.x : baseState ? baseState.ball.x : null;
+  const by = extWorld ? extWorld.ball.y : baseState ? baseState.ball.y : null;
+  if (bx !== null && Math.hypot(bx - e.x, by - e.y) <= BALL_R + PLAYER_R + KICK_REACH + 4) {
+    lastKickT = now;
+  }
+}
+
+// Cuerpo del estado base autoritativo por slot (para chequear stun/slide).
+function baseBodyOf(slot) {
+  if (!baseState) return null;
+  for (const pl of match.players) {
+    if (pl.slot !== slot || !match.myBodyIds.has(pl.id)) continue;
+    for (const b of baseState.bodies) if (b.id === pl.id) return b;
+  }
+  return null;
 }
 
 // Feedback local INMEDIATO de la barrida: slide-whistle + polvito al presionar.
 function localTackleFeedback(slot) {
   const now = performance.now();
   if (now < tackleCdUntil[slot]) return; // cooldown visual conocido
-  const sb = selfBody(slot);
-  const pr = sb ? sb.pred : null;
-  if (pr && (pr.stun > 0.01 || pr.slide > 0.01)) return;
+  const base = baseBodyOf(slot);
+  if (base && (base.stun > 0 || base.slide > 0)) return;
   sfxTackle();
-  tackleCdUntil[slot] = now + TACKLE_COOLDOWN * 1000;
-  if (pr) {
+  tackleCdUntil[slot] = now + TACKLE_COOLDOWN_MS;
+  const e = ownExtState(slot) || base;
+  if (e) {
+    const fx = base ? base.fx : 1;
+    const fy = base ? base.fy : 0;
     const n = Math.max(2, Math.round(4 * fxMult()));
     for (let i = 0; i < n; i++) {
       dustFx.push({
-        x: pr.x + sb.corrX - pr.fx * 6 + (Math.random() - 0.5) * 8,
-        y: pr.y + sb.corrY - pr.fy * 6 + (Math.random() - 0.5) * 8,
-        vx: -pr.fx * (40 + Math.random() * 50) + (Math.random() - 0.5) * 40,
-        vy: -pr.fy * (40 + Math.random() * 50) + (Math.random() - 0.5) * 40 - 14,
+        x: e.x - fx * 6 + (Math.random() - 0.5) * 8,
+        y: e.y - fy * 6 + (Math.random() - 0.5) * 8,
+        vx: -fx * (40 + Math.random() * 50) + (Math.random() - 0.5) * 40,
+        vy: -fy * (40 + Math.random() * 50) + (Math.random() - 0.5) * 40 - 14,
         r: 2 + Math.random() * 2.6,
         life: 0.45,
         maxLife: 0.45,
@@ -2221,19 +2413,11 @@ function localTackleFeedback(slot) {
   }
 }
 
-function pressKick(slot) {
-  if (phase !== "game" || ended) return;
-  const s = slot === 1 ? 1 : 0;
-  localKickFeedback(s);
-  queuedActs[s].kick = true;
-  flushInput(false);
-}
-
 function pressTackle(slot) {
-  if (phase !== "game" || ended) return;
+  if (phase !== "game" || ended || !match || match.tackles === false) return;
   const s = slot === 1 ? 1 : 0;
   localTackleFeedback(s);
-  queuedActs[s].tackle = true;
+  queuedTackle[s] = true;
   flushInput(false);
 }
 
@@ -2251,12 +2435,18 @@ function stopInputLoop() {
     clearInterval(inputTimer);
     inputTimer = 0;
   }
-  queuedActs[0].kick = queuedActs[0].tackle = false;
-  queuedActs[1].kick = queuedActs[1].tackle = false;
+  queuedTackle[0] = false;
+  queuedTackle[1] = false;
+  kickHoldSources[0].clear();
+  kickHoldSources[1].clear();
   keysDown.clear();
   joyReset(0);
   joyReset(1);
 }
+
+// Códigos de tecla que MANTIENEN kick por cuerpo (estado mantenido, SPEC v1.4 J).
+//   no-duo: Espacio / J ; duo: F (cuerpo A), L (cuerpo B).
+const KICK_CODE = "__kick__"; // fuente de kick mantenido por teclado
 
 window.addEventListener("keydown", (e) => {
   if (phase !== "game") return;
@@ -2266,26 +2456,28 @@ window.addEventListener("keydown", (e) => {
     flushInput(false); // input INMEDIATO al cambiar el movimiento (SPEC A)
     return;
   }
-  if (e.repeat) return;
   if (isDuo()) {
-    // v1.3 (SPEC C): cuerpo A = F patear / G barrer; cuerpo B = L patear / K barrer.
+    // v1.4 J: cuerpo A = F kick MANTENIDO / G barrer (edge); B = L kick / K barrer.
     if (e.code === "KeyF") {
       e.preventDefault();
-      pressKick(0);
-    } else if (e.code === "KeyG") {
-      e.preventDefault();
-      pressTackle(0);
+      setKickHold(0, KICK_CODE, true);
     } else if (e.code === "KeyL") {
       e.preventDefault();
-      pressKick(1);
+      setKickHold(1, KICK_CODE, true);
+    } else if (e.code === "KeyG") {
+      if (e.repeat) return;
+      e.preventDefault();
+      pressTackle(0);
     } else if (e.code === "KeyK") {
+      if (e.repeat) return;
       e.preventDefault();
       pressTackle(1);
     }
   } else if (e.code === "Space" || e.code === "KeyJ") {
     e.preventDefault();
-    pressKick(0);
+    setKickHold(0, KICK_CODE, true); // kick MANTENIDO mientras esté apretado
   } else if (e.key === "Shift" || e.code === "KeyK") {
+    if (e.repeat) return;
     e.preventDefault();
     pressTackle(0);
   }
@@ -2294,12 +2486,22 @@ window.addEventListener("keydown", (e) => {
 window.addEventListener("keyup", (e) => {
   if (keysDown.delete(e.code)) {
     flushInput(false); // freno/cambio inmediato
+    return;
+  }
+  // Soltar kick mantenido (flanco de bajada → input inmediato, SPEC v1.4 I).
+  if (isDuo()) {
+    if (e.code === "KeyF") setKickHold(0, KICK_CODE, false);
+    else if (e.code === "KeyL") setKickHold(1, KICK_CODE, false);
+  } else if (e.code === "Space" || e.code === "KeyJ") {
+    setKickHold(0, KICK_CODE, false);
   }
 });
 
 window.addEventListener("blur", () => {
   keysDown.clear();
-  flushInput(false); // soltar todo al perder foco: avisar al server ya
+  releaseAllKick(0); // soltar kick mantenido al perder foco
+  releaseAllKick(1);
+  flushInput(true); // soltar todo: avisar al server ya
 });
 
 /* ------------------------------ Joysticks DINÁMICOS ------------------------------ */
@@ -2356,18 +2558,26 @@ function joyStart(zone, t) {
     parts.el.style.visibility = "visible";
   }
   if (parts.stick) parts.stick.style.transform = "";
+  // v1.4 J (duo): el dedo apoyado SIN arrastrar mantiene kick de ese cuerpo. Se
+  // suelta al arrastrar (joyMove) o al levantar (joyEnd). En no-duo el kick va
+  // por el botón ⚽ (esta zona izquierda solo mueve).
+  if (isDuo()) setKickHold(zone, TOUCH_KICK, true);
 }
+
+const TOUCH_KICK = "__touch__"; // fuente de kick mantenido por zona táctil
 
 function joyMove(zone, t) {
   const j = joys[zone];
   let dx = t.clientX - j.ox;
   let dy = t.clientY - j.oy;
   const d = Math.hypot(dx, dy);
-  // En duo el movimiento arranca recién al superar el umbral de TAP (12 px):
-  // "el tap no mueve, patea" (SPEC C). En no-duo responde desde el primer px (v1.2).
+  // v1.4 J (duo): el dedo arranca como KICK MANTENIDO (sin arrastrar = cargar el
+  // disparo). Al superar el umbral de arrastre (12 px) pasa a MOVER y SUELTA el
+  // kick mantenido de esa zona. En no-duo responde desde el primer px (v1.2).
   if (isDuo() && !j.moved) {
     if (d < TAP_MOVE_PX) return;
     j.moved = true;
+    setKickHold(zone, TOUCH_KICK, false); // arrastrar cancela el kick mantenido
   }
   if (d > JOY_RADIUS) {
     dx *= JOY_RADIUS / d;
@@ -2445,26 +2655,31 @@ function joyEnd(e, cancelled) {
       const j = joys[z];
       if (!j.active || t.identifier !== j.id) continue;
       const now = performance.now();
-      // Gestos TAP / DOBLE TAP (v1.3, solo duo): levantar rápido y sin arrastre
-      // patea ese cuerpo; un segundo tap ≤ 300 ms suma la barrida.
-      if (!cancelled && isDuo() && !j.moved && now - j.startT < TAP_MS) {
-        pressKick(z);
-        if (now - j.lastTapT <= DOUBLE_TAP_MS) {
-          pressTackle(z);
-          j.lastTapT = -1e9; // un tercer tap arranca una secuencia nueva
-        } else {
-          j.lastTapT = now;
+      const wasShortHold = !j.moved && now - j.startT < TAP_MS;
+      // v1.4 J (duo): mantener el dedo sin arrastrar = kick mantenido (ya activo
+      // desde joyStart); al LEVANTAR se suelta (flanco de bajada). DOBLE TAP
+      // mantenido sigue disponible para barrida si la sala la permite.
+      if (isDuo()) {
+        setKickHold(z, TOUCH_KICK, false); // soltar el kick mantenido de la zona
+        if (!cancelled && wasShortHold && match && match.tackles !== false) {
+          if (now - j.lastTapT <= DOUBLE_TAP_MS) {
+            pressTackle(z);
+            j.lastTapT = -1e9; // un tercer tap arranca una secuencia nueva
+          } else {
+            j.lastTapT = now;
+          }
         }
       }
       joyReset(z);
-      flushInput(false); // freno inmediato
+      flushInput(true); // freno/soltado inmediato
     }
   }
 }
 window.addEventListener("touchend", (e) => joyEnd(e, false));
 window.addEventListener("touchcancel", (e) => joyEnd(e, true));
 
-function bindTouchButton(btn, onPress) {
+// Botón edge-trigger (barrida): dispara onPress al apretar, nada al soltar.
+function bindEdgeButton(btn, onPress) {
   if (!btn) return;
   btn.addEventListener(
     "touchstart",
@@ -2481,15 +2696,37 @@ function bindTouchButton(btn, onPress) {
   };
   btn.addEventListener("touchend", release);
   btn.addEventListener("touchcancel", release);
-  // Fallback para dispositivos con mouse que muestren los controles.
   btn.addEventListener("mousedown", (e) => {
     e.preventDefault();
     onPress();
   });
 }
-// Los botones ⚽/🦵 siempre operan el cuerpo A (en duo están ocultos, SPEC C).
-bindTouchButton(btnKick, () => pressKick(0));
-bindTouchButton(btnTackle, () => pressTackle(0));
+
+// Botón de kick MANTENIDO (⚽, SPEC v1.4 J): kick true mientras el dedo está
+// sobre el botón; flanco de subida/bajada mandan input inmediato.
+const BTN_KICK = "__btnkick__";
+function bindKickButton(btn, slot) {
+  if (!btn) return;
+  const down = (e) => {
+    e.preventDefault();
+    btn.classList.add("pressed");
+    setKickHold(slot, BTN_KICK, true);
+  };
+  const up = (e) => {
+    if (e.cancelable) e.preventDefault();
+    btn.classList.remove("pressed");
+    setKickHold(slot, BTN_KICK, false);
+  };
+  btn.addEventListener("touchstart", down, { passive: false });
+  btn.addEventListener("touchend", up);
+  btn.addEventListener("touchcancel", up);
+  btn.addEventListener("mousedown", down);
+  btn.addEventListener("mouseup", up);
+  btn.addEventListener("mouseleave", up);
+}
+// Los botones ⚽/🦵 siempre operan el cuerpo A (en duo están ocultos, SPEC J).
+bindKickButton(btnKick, 0);
+bindEdgeButton(btnTackle, () => pressTackle(0));
 
 /* ==================== Mobile: fullscreen, orientación y vibración ==================== */
 function enterGameDisplay() {
@@ -3243,207 +3480,214 @@ function voicePackSay(event) {
   return true;
 }
 
-/* ============ Predicción de los CUERPOS PROPIOS (v1.2 SPEC A, v1.3 ×N) ============
- * Cada cuerpo propio se simula LOCALMENTE con la física exacta del server
- * (tickRoom): ACCEL/FRICTION/MAX_SPEED del estadio + confinamiento contra todas
- * las paredes; stun y slide bloquean el control. Cada frame del rAF integra con
- * dt real y registra {seq, a:{mx,my}, b:{mx,my}, dt} en pendingInputs (UNA
- * entrada cubre ambos cuerpos: mismo seq, SPEC v1.3 B). Al llegar un state se
- * parte del estado autoritativo (pos/vel + iq), se descartan los pendientes ya
- * aplicados (seq ≤ iq) y se re-simulan los restantes POR CUERPO con el input de
- * su slot. La sim de un cuerpo (simSelfStep) es LA MISMA que en v1.2 — no se
- * duplica ninguna fórmula. El render de los cuerpos propios usa SIEMPRE
- * pred + offset de corrección (decae ~120 ms, snap > 80 u). */
+/* =============== EXTRAPOLACIÓN DE MUNDO COMPLETO (SPEC v1.4 H) ===============
+ * El "sin delay" de HaxBall: el cliente clona el ÚLTIMO estado autoritativo y lo
+ * simula hacia adelante `ext` ticks con la MISMA física del server (stepWorld del
+ * núcleo, mismo orden, mismas fórmulas, mismas constantes). Aplica:
+ *   - los inputs REALES de los cuerpos propios → respuesta instantánea, 0 delay;
+ *   - el último input conocido de los rivales (se asume que siguen igual);
+ *   - la pelota se simula con TODOS (tu kick la mueve YA, localmente).
+ * Reconciliación POR DISCO (pelota incluida): al llegar un snapshot se reemplaza
+ * el estado base por el del server y la diferencia con lo que se mostraba se
+ * absorbe con un offset que decae ~120 ms; si el error es enorme (> 60 u) ⇒ snap.
+ * NO se duplica ninguna fórmula: toda la física vive en physics-core.js. */
 
-// Constantes efectivas de física del estadio (= stadiumPhysics del server con la
-// base v1.2): solo "nieve" toca el movimiento del jugador (ACCEL×0.55, FRICTION×0.45).
-function clientStadiumPhys(stadium) {
-  if (stadium === "nieve") return { accel: ACCEL * 0.55, friction: FRICTION * 0.45 };
-  return { accel: ACCEL, friction: FRICTION };
+// Cantidad de ticks de extrapolación (SPEC v1.4 H). settings.extrapolation:
+//   0  = "Auto" adaptativo = round(RTT/2 / 16.67) + 1, clamp [1, 12].
+//   >0 = ms fijos → round(ms / 16.67), clamp [0, 12] (0 ⇒ ver el pasado interpolado).
+function extTicks() {
+  const forced = settings.extrapolation;
+  if (forced > 0) return Math.max(0, Math.min(EXT_MAX, Math.round(forced / TICK_MS)));
+  const auto = Math.round(lastRttMs / 2 / TICK_MS) + 1;
+  return Math.max(1, Math.min(EXT_MAX, auto));
 }
 
-// Un paso de simulación del propio jugador — COPIA de tickRoom (server.js):
-// mismo orden (stun → slide/aceleración/fricción → integración → confinamiento).
-function simSelfStep(b, mx, my, dt, paused) {
-  const stunned = b.stun > 0;
-  if (stunned) b.stun = Math.max(0, b.stun - dt);
-  // Durante la pausa post-gol la física queda congelada (el stun sí corre).
-  if (paused || !match) return;
-
-  if (stunned && b.slide > 0) b.slide = 0; // el stun corta el slide propio
-
-  if (b.slide > 0) {
-    // Slide: velocidad fija hacia la dirección de barrida, sin control.
-    b.vx = b.sdx * SLIDE_SPEED;
-    b.vy = b.sdy * SLIDE_SPEED;
-    b.slide = Math.max(0, b.slide - dt);
-  } else {
-    // El server clampa y normaliza el input si |v| > 1 (guard anti-NaN incluido).
-    let ix = isFinite(mx) ? mx : 0;
-    let iy = isFinite(my) ? my : 0;
-    const ilen = Math.hypot(ix, iy);
-    if (ilen > 1) {
-      ix /= ilen;
-      iy /= ilen;
+// Construye el estado base de stepWorld a partir de un snapshot del server. Crea
+// los cuerpos con makeBody (todos los campos del modelo v1.4) y los popula con el
+// estado autoritativo: pos/vel en u/tick, stun/slide/kickCd en TICKS, kickArmed.
+function buildBaseFromSnap(pm, ball) {
+  const bodies = [];
+  for (const pl of match.players) {
+    const sp = pm.get(pl.id);
+    const b = PHYS.makeBody({
+      id: pl.id, team: pl.team, slot: pl.slot, owner: pl.owner,
+      x: sp ? sp.x : 0, y: sp ? sp.y : 0,
+      fx: sp ? sp.fx : 0, fy: sp ? sp.fy : 1,
+    });
+    if (sp) {
+      b.vx = sp.vx; b.vy = sp.vy;
+      b.fx = sp.fx; b.fy = sp.fy;
+      b.stun = sp.stun; b.slide = sp.slide; b.kickCd = sp.kc;
+      b.kickArmed = sp.ka; b.kickHeld = sp.kh;
+      // Durante un slide el server fija la dirección de barrida = facing.
+      b.sdx = sp.fx; b.sdy = sp.fy;
+      b.slideHit = {}; b.slideBall = sp.slide <= 0;
     }
-    // facing = último input de movimiento no nulo (server lo fija en handleInput
-    // SIN chequear stun — solo el slide lo congela, y esta rama ya es slide ≤ 0):
-    // se actualiza también stunned para que la cuña/botines no diverjan del server.
-    if (ilen > 1e-9) {
-      const l = Math.hypot(ix, iy);
-      b.fx = ix / l;
-      b.fy = iy / l;
-    }
-    if (!stunned && ilen > 1e-9) {
-      b.vx += ix * match.phys.accel * dt;
-      b.vy += iy * match.phys.accel * dt;
-      const sp = Math.hypot(b.vx, b.vy);
-      if (sp > MAX_SPEED) {
-        // Por encima de MAX_SPEED (knockback/slide) decae con la fricción del
-        // estadio hasta MAX_SPEED en vez de recortarse de golpe (= server).
-        const target = Math.max(MAX_SPEED, sp * Math.exp(-match.phys.friction * dt));
-        b.vx *= target / sp;
-        b.vy *= target / sp;
-      }
-    } else {
-      const f = Math.exp(-match.phys.friction * dt);
-      b.vx *= f;
-      b.vy *= f;
-    }
+    bodies.push(b);
   }
-
-  b.x += b.vx * dt;
-  b.y += b.vy * dt;
-
-  // Confinamiento a la cancha: desliza contra TODAS las paredes, arcos incluidos.
-  for (const w of match.walls) {
-    const d = (b.x - w.cx) * w.nx + (b.y - w.cy) * w.ny;
-    if (d > -PLAYER_R) {
-      b.x -= w.nx * (d + PLAYER_R);
-      b.y -= w.ny * (d + PLAYER_R);
-      const vn = b.vx * w.nx + b.vy * w.ny;
-      if (vn > 0) {
-        b.vx -= w.nx * vn;
-        b.vy -= w.ny * vn;
-      }
-    }
-  }
+  const ballState = PHYS.makeBall();
+  ballState.x = ball.x; ballState.y = ball.y;
+  ballState.vx = ball.vx; ballState.vy = ball.vy;
+  ballState.lastTouch = ball.lt != null ? ball.lt : null;
+  return { bodies: bodies, ball: ballState, rules: { tackles: match.tackles !== false } };
 }
 
-// Reconciliación al llegar un state (SPEC A, v1.3 ×N): por CADA cuerpo propio,
-// estado server + iq → descartar pendientes acked → re-simular los restantes
-// con el input de SU slot → nueva pred. La diferencia con el render anterior
-// se absorbe con corrX/corrY por cuerpo. pendingInputs es compartido: un solo
-// seq cubre ambos cuerpos y el iq viaja igual en los dos (SPEC v1.3 B).
-function reconcileSelf(pm, paused) {
+// Clon profundo (suficiente para stepWorld) de un estado base por frame.
+function cloneState(src) {
+  const bodies = [];
+  for (const b of src.bodies) {
+    bodies.push({
+      id: b.id, team: b.team, slot: b.slot, owner: b.owner,
+      x: b.x, y: b.y, vx: b.vx, vy: b.vy, fx: b.fx, fy: b.fy,
+      kickCd: b.kickCd, kickArmed: b.kickArmed, kickHeld: b.kickHeld,
+      stun: b.stun, slide: b.slide, sdx: b.sdx, sdy: b.sdy,
+      tackleCd: b.tackleCd,
+      slideHit: b.slideHit ? Object.assign({}, b.slideHit) : null,
+      slideBall: b.slideBall,
+    });
+  }
+  const ball = {
+    x: src.ball.x, y: src.ball.y, vx: src.ball.vx, vy: src.ball.vy,
+    lastTouch: src.ball.lastTouch,
+  };
+  return { bodies: bodies, ball: ball, rules: src.rules };
+}
+
+// Mapa de inputs por id para stepWorld (SPEC v1.4 H):
+//   - cuerpos PROPIOS: input REAL en vivo (movimiento + kick MANTENIDO) → cero
+//     delay, tu kick mueve la pelota YA;
+//   - RIVALES: no se conocen sus inputs, así que se asume input NEUTRO (siguen
+//     con su velocidad + damping del snapshot). stepWorld cae a ZERO_INPUT para
+//     todo id ausente del mapa: la reconciliación corrige el drift por snapshot.
+function buildInputsById() {
+  const out = {};
+  if (ended) return out; // sin control tras gameover: el mundo sigue por inercia
+  for (const pl of match.players) {
+    if (!match.myBodyIds.has(pl.id)) continue;
+    const slot = pl.slot === 1 ? 1 : 0;
+    const mv = currentInputFor(slot);
+    // tackle es edge (lo consume flushInput→server); en la extrapolación no se
+    // re-dispara para no inventar barridas que el server no va a confirmar.
+    out[pl.id] = { mx: mv.mx, my: mv.my, kick: kickHeldFor(slot), tackle: false };
+  }
+  return out;
+}
+
+// Al llegar un snapshot: reemplazar el estado base por el del server y reconciliar
+// por disco contra lo que se venía mostrando (extWorld). El offset por disco
+// (dragOffset) se setea a render_anterior − server_nuevo y luego decae en frame().
+function rebaseWorld(pm, ball, paused) {
   lastPaused = paused;
-  if (!selfPred.length) return;
-  // iq = último seq aplicado por el server (igual en ambos cuerpos propios).
-  // Si faltara (server viejo), se da todo por aplicado: pred sigue al server
-  // y el offset suaviza el resto.
-  let acked = null;
-  for (const sb of selfPred) {
-    const me = pm.get(sb.id);
-    if (me && me.iq !== null) {
-      acked = me.iq;
-      break;
-    }
+  const prevExt = extWorld; // lo que se mostraba antes de este snapshot
+  baseState = buildBaseFromSnap(pm, ball);
+
+  // iq = último seq aplicado por el server (igual en todos los cuerpos propios).
+  // No re-simulamos pendientes por seq (la extrapolación parte SIEMPRE del estado
+  // server fresco y avanza ext ticks con el input actual): el offset por disco
+  // suaviza el salto. Mantenemos la firma del protocolo (iq) por compatibilidad.
+
+  if (!prevExt) {
+    dragOffset.clear(); // primer snapshot del partido/kickoff: snap directo
+    return;
   }
-  if (acked === null) acked = inputSeq;
-  while (pendingInputs.length && pendingInputs[0].seq <= acked) pendingInputs.shift();
-
-  for (const sb of selfPred) {
-    const me = pm.get(sb.id);
-    if (!me) continue;
-    const hadPred = sb.pred !== null;
-    const prevRX = hadPred ? sb.pred.x + sb.corrX : 0;
-    const prevRY = hadPred ? sb.pred.y + sb.corrY : 0;
-
-    const sim = {
-      x: me.x,
-      y: me.y,
-      vx: me.vx,
-      vy: me.vy,
-      fx: me.fx,
-      fy: me.fy,
-      stun: me.stun,
-      slide: me.slide,
-      // Durante el slide el facing quedó fijo en la dirección de barrida (server).
-      sdx: me.fx,
-      sdy: me.fy,
-    };
-    for (const pi of pendingInputs) {
-      const inp = sb.slot === 1 ? pi.b : pi.a;
-      simSelfStep(sim, inp.mx, inp.my, pi.dt, paused);
-    }
-    sb.pred = sim;
-
-    if (hadPred) {
-      // Suavizado: offset = render anterior − predicción nueva; decae ~120 ms.
-      sb.corrX = prevRX - sim.x;
-      sb.corrY = prevRY - sim.y;
-      if (Math.hypot(sb.corrX, sb.corrY) > CORR_SNAP) {
-        sb.corrX = 0; // corrección enorme (teleport/lag spike): snap directo
-        sb.corrY = 0;
-      }
-    } else {
-      sb.corrX = 0;
-      sb.corrY = 0;
-    }
+  // Offset por cuerpo: posición mostrada − nueva posición server (snap si > 60 u).
+  for (const b of baseState.bodies) {
+    const shown = prevExt.byId ? prevExt.byId.get(b.id) : null;
+    setDragOffset(b.id, shown ? shown.x : b.x, shown ? shown.y : b.y, b.x, b.y);
   }
+  const shownBall = prevExt.ball;
+  setDragOffset(BALL_KEY, shownBall.x, shownBall.y, baseState.ball.x, baseState.ball.y);
 }
 
-// Avance de la predicción en cada frame del rAF (dt real, SPEC A). v1.3: una
-// sola entrada de pendingInputs por frame con el input de AMBOS cuerpos.
+function setDragOffset(key, shownX, shownY, srvX, srvY) {
+  const dx = shownX - srvX;
+  const dy = shownY - srvY;
+  if (Math.hypot(dx, dy) > CORR_SNAP) {
+    dragOffset.delete(key); // error enorme (gol/kickoff/lag spike): snap directo
+    return;
+  }
+  dragOffset.set(key, { dx: dx, dy: dy });
+}
+
+// Reset de la extrapolación (start/kickoff/salida): el próximo state re-basea
+// limpio, sin offset (snap). Conserva la firma resetPrediction() de v1.2/v1.3.
+function resetPrediction() {
+  baseState = null;
+  extWorld = null;
+  dragOffset.clear();
+  queuedTackle[0] = false;
+  queuedTackle[1] = false;
+}
+
+// Avance por frame del rAF: flush de inputs pospuestos + decaimiento del offset.
+// La extrapolación en sí se hace en sampleState() (cada frame, sobre el estado
+// base fresco) para que SIEMPRE refleje el input más reciente con cero delay.
 function updatePrediction(dt) {
   if (!match || phase !== "game") return;
   flushInput(false); // reintento de cambios/acciones que el cap de 60/s pospuso
-  if (ended || !selfPred.length) return;
-  let anyPred = false;
-  for (const sb of selfPred) {
-    if (sb.pred) {
-      anyPred = true;
-      break;
+  // El offset de corrección por disco decae exponencialmente a 0 en ~120 ms.
+  const k = Math.exp(-CORR_DECAY * dt);
+  for (const [key, off] of dragOffset) {
+    off.dx *= k;
+    off.dy *= k;
+    if (Math.abs(off.dx) < 0.02 && Math.abs(off.dy) < 0.02) dragOffset.delete(key);
+  }
+}
+
+/* ===== Muestreo del mundo a renderizar: extrapolación (ext>0) o interp (ext=0) =====
+ * ext>0: clona el estado base autoritativo y corre stepWorld ext ticks con los
+ *        inputs reales (propios) + último input (rivales). Render = extrapolado +
+ *        offset de reconciliación por disco. Es el camino normal (HaxBall).
+ * ext=0: "ver el pasado interpolado" (suave, con delay) — interpola el buffer de
+ *        snapshots como v1.2/v1.3. El usuario lo elige con #opt-extrapolation = 0. */
+function sampleState() {
+  const ext = extTicks();
+  if (ext > 0 && baseState && PHYS) return sampleExtrapolated(ext);
+  return sampleInterpolated();
+}
+
+function sampleExtrapolated(ext) {
+  const world = cloneState(baseState);
+  if (!lastPaused) {
+    // El input es el mismo en todos los ticks extrapolados (se asume sostenido).
+    const inputs = buildInputsById();
+    for (let i = 0; i < ext; i++) {
+      PHYS.stepWorld(world, inputs, baseArena, baseArena.phys, world.rules);
     }
   }
-  if (!anyPred) return; // todavía sin estado autoritativo (pre primer state)
-  const a = currentInputFor(0);
-  const b = isDuo() ? currentInputFor(1) : { mx: 0, my: 0 };
-  pendingInputs.push({ seq: inputSeq, a: { mx: a.mx, my: a.my }, b: { mx: b.mx, my: b.my }, dt });
-  if (pendingInputs.length > PENDING_MAX) {
-    pendingInputs.splice(0, pendingInputs.length - PENDING_MAX);
+  // Guardar el mundo extrapolado SIN offset (es la base para reconciliar el
+  // próximo snapshot) y construir el estado de render con el offset por disco.
+  const byId = new Map();
+  for (const b of world.bodies) byId.set(b.id, b);
+  extWorld = { byId: byId, ball: { x: world.ball.x, y: world.ball.y } };
+
+  const players = new Map();
+  for (const b of world.bodies) {
+    const off = dragOffset.get(b.id);
+    players.set(b.id, {
+      id: b.id,
+      x: b.x + (off ? off.dx : 0),
+      y: b.y + (off ? off.dy : 0),
+      fx: b.fx, fy: b.fy,
+      stun: b.stun, kc: b.kickCd, slide: b.slide,
+      ka: b.kickArmed, kh: b.kickHeld,
+    });
   }
-  // El offset de corrección decae exponencialmente a 0 en ~120 ms.
-  const k = Math.exp(-CORR_DECAY * dt);
-  for (const sb of selfPred) {
-    if (!sb.pred) continue;
-    const inp = sb.slot === 1 ? b : a;
-    simSelfStep(sb.pred, inp.mx, inp.my, dt, lastPaused);
-    sb.corrX *= k;
-    sb.corrY *= k;
-    if (Math.abs(sb.corrX) < 0.01) sb.corrX = 0;
-    if (Math.abs(sb.corrY) < 0.01) sb.corrY = 0;
-  }
+  const boff = dragOffset.get(BALL_KEY);
+  return {
+    ball: {
+      x: world.ball.x + (boff ? boff.dx : 0),
+      y: world.ball.y + (boff ? boff.dy : 0),
+      vx: world.ball.vx, vy: world.ball.vy,
+    },
+    players: players,
+    paused: lastPaused,
+  };
 }
 
-// Reset de la predicción (start/kickoff/salida): el próximo state la
-// re-inicializa desde el estado autoritativo, sin offset (snap limpio).
-function resetPrediction() {
-  for (const sb of selfPred) {
-    sb.pred = null;
-    sb.corrX = 0;
-    sb.corrY = 0;
-  }
-  pendingInputs = [];
-  queuedActs[0].kick = queuedActs[0].tackle = false;
-  queuedActs[1].kick = queuedActs[1].tackle = false;
-}
-
-/* ==================== Interpolación (delay adaptativo, v1.2) ==================== */
-// Pelota y RIVALES se renderizan interpDelay ms en el pasado interpolando entre
-// snapshots (50–160 ms según snapInterval + jitter). Los cuerpos PROPIOS no:
-// su pose sale de la predicción (pred + corr por cuerpo), siempre fresca.
-function sampleState() {
+// ext=0: interpolación clásica (pelota + TODOS los cuerpos) interpDelay ms en el
+// pasado. Sin extrapolación = sin offset; extWorld se sincroniza con lo mostrado.
+function sampleInterpolated() {
   if (!snaps.length) return null;
   const rt = performance.now() - interpDelay;
   let s0 = snaps[0];
@@ -3464,43 +3708,26 @@ function sampleState() {
   const L = (u, v) => u + (v - u) * a;
 
   const players = new Map();
+  const byId = new Map();
   for (const [id, p1] of s1.players) {
     const p0 = s0.players.get(id) || p1;
+    const x = L(p0.x, p1.x);
+    const y = L(p0.y, p1.y);
     players.set(id, {
-      id,
-      x: L(p0.x, p1.x),
-      y: L(p0.y, p1.y),
-      fx: L(p0.fx, p1.fx),
-      fy: L(p0.fy, p1.fy),
-      stun: p1.stun,
-      kc: p1.kc,
-      slide: p1.slide || 0, // v1.1: s restantes de barrida (0 si no)
+      id, x: x, y: y,
+      fx: L(p0.fx, p1.fx), fy: L(p0.fy, p1.fy),
+      stun: p1.stun, kc: p1.kc, slide: p1.slide || 0,
+      ka: p1.ka, kh: p1.kh,
     });
+    byId.set(id, { x: x, y: y });
   }
-
-  // El RENDER de los cuerpos PROPIOS usa SIEMPRE la predicción (SPEC A, v1.3
-  // ×N): posición pred + offset de corrección y facing local (respuesta
-  // inmediata al input de cada cuerpo).
-  for (const sb of selfPred) {
-    if (!sb.pred) continue;
-    const self = players.get(sb.id);
-    if (!self) continue;
-    self.x = sb.pred.x + sb.corrX;
-    self.y = sb.pred.y + sb.corrY;
-    self.fx = sb.pred.fx;
-    self.fy = sb.pred.fy;
-    self.stun = sb.pred.stun;
-    self.slide = sb.pred.slide;
-  }
-
+  const bx = L(s0.ball.x, s1.ball.x);
+  const by = L(s0.ball.y, s1.ball.y);
+  extWorld = { byId: byId, ball: { x: bx, y: by } };
+  dragOffset.clear(); // sin extrapolación no hay reconciliación que suavizar
   return {
-    ball: {
-      x: L(s0.ball.x, s1.ball.x),
-      y: L(s0.ball.y, s1.ball.y),
-      vx: L(s0.ball.vx, s1.ball.vx),
-      vy: L(s0.ball.vy, s1.ball.vy),
-    },
-    players,
+    ball: { x: bx, y: by, vx: L(s0.ball.vx, s1.ball.vx), vy: L(s0.ball.vy, s1.ball.vy) },
+    players: players,
     paused: s1.paused,
   };
 }
@@ -3718,12 +3945,13 @@ function drawMottling(b, bw, bh) {
   }
 }
 
-// Sombrillas alrededor de la cancha (estadio "playa"), fuera del campo.
+// Sombrillas alrededor de la cancha (estadio "playa"), fuera del campo. Usa los
+// segmentos de pared del núcleo (arena.walls: cx,cy,dx,dy,nx,ny,half).
 function drawUmbrellas() {
   if (!match.umbrellas) {
     const arr = [];
     let i = 0;
-    for (const w of match.walls) {
+    for (const w of match.arena.walls) {
       for (const off of [-0.58, 0.58]) {
         const s = w.half * off;
         arr.push({
@@ -3747,16 +3975,17 @@ function drawUmbrellas() {
   ctx.restore();
 }
 
+// Arcos: una boca por equipo, desde la geometría del núcleo (match.goals). Cada
+// boca trae sus extremos (ax,ay,bx,by), centro, normal exterior y dirección.
 function drawGoals() {
-  const gw = GOAL_W / 2;
-  for (const w of match.walls) {
-    if (w.goal === null) continue;
-    const owner = match.teams[w.goal]; // v1.1: el arco k pertenece al EQUIPO k
+  for (const g of match.goals) {
+    const owner = match.teams[g.team]; // el arco k pertenece al EQUIPO k
     if (!owner) continue;
-    const x0 = w.cx - w.dx * gw;
-    const y0 = w.cy - w.dy * gw;
-    const x1 = w.cx + w.dx * gw;
-    const y1 = w.cy + w.dy * gw;
+    const x0 = g.ax;
+    const y0 = g.ay;
+    const x1 = g.bx;
+    const y1 = g.by;
+    const gw = GOAL_W / 2;
 
     // Red en cuadrícula detrás de la línea (hacia afuera).
     ctx.save();
@@ -3766,12 +3995,12 @@ function drawGoals() {
     const step = 8;
     ctx.beginPath();
     for (let s = -gw; s <= gw + 0.1; s += step) {
-      ctx.moveTo(w.cx + w.dx * s, w.cy + w.dy * s);
-      ctx.lineTo(w.cx + w.dx * s + w.nx * depth, w.cy + w.dy * s + w.ny * depth);
+      ctx.moveTo(g.cx + g.dx * s, g.cy + g.dy * s);
+      ctx.lineTo(g.cx + g.dx * s + g.nx * depth, g.cy + g.dy * s + g.ny * depth);
     }
     for (let d = 0; d <= depth + 0.1; d += step) {
-      ctx.moveTo(x0 + w.nx * d, y0 + w.ny * d);
-      ctx.lineTo(x1 + w.nx * d, y1 + w.ny * d);
+      ctx.moveTo(x0 + g.nx * d, y0 + g.ny * d);
+      ctx.lineTo(x1 + g.nx * d, y1 + g.ny * d);
     }
     ctx.stroke();
 
@@ -3792,9 +4021,29 @@ function drawGoals() {
     ctx.font = "28px system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(owner.flags, w.cx + w.nx * 38, w.cy + w.ny * 38);
+    ctx.fillText(owner.flags, g.cx + g.nx * 38, g.cy + g.ny * 38);
     ctx.restore();
   }
+}
+
+// POSTES (SPEC v1.4 F/J): disco claro radio POST_R en cada extremo de la boca.
+// La pelota y los jugadores rebotan en ellos ("pegó en el palo").
+function drawPosts() {
+  ctx.save();
+  for (const p of match.posts) {
+    // Halo tenue + disco claro con borde, para que se lea como un palo.
+    const g = ctx.createRadialGradient(p.x, p.y, 1, p.x, p.y, POST_R);
+    g.addColorStop(0, "rgba(255,255,255,0.98)");
+    g.addColorStop(1, "rgba(225,232,244,0.92)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, POST_R, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.lineWidth = 1.4;
+    ctx.strokeStyle = "rgba(40,52,76,0.55)";
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 // BOTINES animados (v1.1). Se llama desde drawPlayers con el ctx YA trasladado al
@@ -3943,6 +4192,31 @@ function drawPlayers(st, now) {
 
     if (stunned) ctx.rotate(Math.sin(now / 90) * 0.2);
 
+    // v1.4 J: indicador de kick ARMADO/cargando. Mientras mantenés kick el cuerpo
+    // se oscurece (como HaxBall) y lleva un aro pulsante; en cooldown, un
+    // resplandor sutil. Solo en cuerpos propios (la info kh/kc viaja del server o
+    // de la extrapolación; para los rivales no se conoce con certeza).
+    const charging = mine && !stunned && p.kh;
+    const onCd = mine && !stunned && (p.kc || 0) > 0;
+    if (charging) {
+      const pulse = 0.5 + 0.5 * Math.sin(now / 120);
+      ctx.save();
+      ctx.strokeStyle = "rgba(255,236,150," + (0.55 + 0.35 * pulse).toFixed(3) + ")";
+      ctx.lineWidth = 2.6;
+      ctx.beginPath();
+      ctx.arc(0, 0, PLAYER_R + 3 + pulse * 1.5, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    } else if (onCd) {
+      ctx.save();
+      ctx.strokeStyle = "rgba(255,255,255,0.35)";
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(0, 0, PLAYER_R + 3, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
     // Cuña de facing.
     const fa = Math.atan2(p.fy, p.fx);
     ctx.save();
@@ -3956,7 +4230,7 @@ function drawPlayers(st, now) {
     ctx.fill();
     ctx.restore();
 
-    // Cuerpo con gradiente radial c2 → c1 (gris si está stunned).
+    // Cuerpo con gradiente radial c2 → c1 (gris si stunned; oscurecido si carga kick).
     const g = ctx.createRadialGradient(-4, -5, 2, 0, 0, PLAYER_R + 2);
     if (stunned) {
       g.addColorStop(0, "#d4d4d4");
@@ -3970,6 +4244,13 @@ function drawPlayers(st, now) {
     ctx.arc(0, 0, PLAYER_R, 0, Math.PI * 2);
     ctx.fillStyle = g;
     ctx.fill();
+    // Tinte oscuro al cargar el disparo (HaxBall oscurece al jugador con kick).
+    if (charging) {
+      ctx.fillStyle = "rgba(0,0,0,0.28)";
+      ctx.beginPath();
+      ctx.arc(0, 0, PLAYER_R, 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.lineWidth = 2.2;
     ctx.strokeStyle = "rgba(255,255,255,0.92)";
     ctx.stroke();
@@ -4031,12 +4312,15 @@ function drawPent(x, y, r) {
 function drawBall(st, dt, now) {
   const b = st.ball;
   const speed = Math.hypot(b.vx, b.vy);
-  ballSpin += (speed / BALL_R) * dt * 0.35;
+  // speed está en u/tick (v1.4). dt es en segundos: ×60 lo lleva a u/s para que la
+  // rotación quede a la misma escala visible que el modelo viejo en u/s.
+  ballSpin += (speed * 60 / BALL_R) * dt * 0.35;
 
-  // Estela cuando va rápido.
+  // Estela cuando va rápido. Umbral en u/tick: un disparo arranca a speed 5
+  // (KICK_STRENGTH) y "rápido" es ~3 u/tick (= 180 u/s), igual que sfxBounce.
   ballTrail.push({ x: b.x, y: b.y });
   if (ballTrail.length > 14) ballTrail.shift();
-  if (speed > 240) {
+  if (speed > 3) {
     ctx.save();
     for (let i = 0; i < ballTrail.length - 1; i++) {
       const a = (i / ballTrail.length) * 0.25;
@@ -4216,7 +4500,9 @@ function frame(now) {
   lastFrameT = now;
   if (phase !== "game" || !match) return;
 
-  // Predicción del propio jugador con dt real + flush de inputs pospuestos (v1.2).
+  // v1.4 H: decae el offset de reconciliación por disco + flush de inputs
+  // pospuestos por el cap de 60/s. La extrapolación de mundo se hace en
+  // sampleState() (cada frame, sobre el estado base fresco) para 0 delay.
   updatePrediction(dt);
 
   const dpr = resizeCanvas();
@@ -4248,6 +4534,7 @@ function frame(now) {
   drawField(theme);
   if (theme.umbrellas) drawUmbrellas();
   drawGoals();
+  drawPosts(); // v1.4 F: palos (discos claros r8) en los extremos de cada boca
   updateDust(dt, theme); // polvito de barrida, debajo de los jugadores
 
   const st = sampleState();
@@ -4266,9 +4553,10 @@ function frame(now) {
   updateConfetti(dt, now);
   if (theme.snow) updateSnow(dt, now);
 
-  // Feedback de cooldown de barrida (la de patada llega en el estado: kc).
-  // El botón siempre refleja el cuerpo A (en duo está oculto, SPEC C).
+  // Feedback de cooldown de barrida (cuerpo A). En sala sin barrida está oculto.
   if (btnTackle) btnTackle.classList.toggle("cooldown", performance.now() < tackleCdUntil[0]);
+  // v1.4 J: el botón ⚽ refleja el kick MANTENIDO del cuerpo A (.kick-armed, CSS).
+  if (btnKick) btnKick.classList.toggle("kick-armed", kickHeldFor(0));
 }
 
 /* ================================ Inicialización ================================ */
