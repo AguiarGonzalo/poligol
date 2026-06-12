@@ -4,6 +4,7 @@
  *
  * Uso:
  *   node tools/loadtest.js --url ws://localhost:3000 --rooms 250 --players 4 --minutes 5
+ *   (flag opcional --duo: salas en modo duo, 2–4 usuarios, inputs dobles con `b`)
  *
  * Cada sala: un bot hace create (privada) y al recibir su código entran los joins;
  * todos mandan ready y el server auto-arranca (countdown de 3 s). Los bots mandan
@@ -11,6 +12,8 @@
  * índice global de bot) y patean (kick:true) al estar cerca de la pelota; cada 2 s
  * mandan {type:"ping", t} y miden RTT con el pong. Tras un gameover el host pide
  * rematch y todos se re-readyan (la sala queda activa toda la corrida).
+ * Con --duo (SPEC v1.3 F) el host pone la sala en modo duo y cada bot controla sus
+ * DOS cuerpos: los campos planos mueven el slot 0 y el objeto `b` el slot 1.
  *
  * Imprime cada 10 s: salas activas, msgs/s recibidos, RTT p50/p95 (ventana de 10 s);
  * al final, un resumen. NO se incluye en el deploy (tools/ está fuera de public/).
@@ -35,13 +38,13 @@ const READY_DEBOUNCE_MS = 250; // no re-mandar ready más seguido que esto
 function usageAndExit(message) {
   if (message) console.error("Error: " + message);
   console.error(
-    "Uso: node tools/loadtest.js --url ws://host:puerto --rooms N --players 4 --minutes M"
+    "Uso: node tools/loadtest.js --url ws://host:puerto --rooms N --players 4 --minutes M [--duo]"
   );
   process.exit(1);
 }
 
 function parseArgs(argv) {
-  const args = { url: "ws://localhost:3000", rooms: 10, players: 4, minutes: 1 };
+  const args = { url: "ws://localhost:3000", rooms: 10, players: 4, minutes: 1, duo: false };
   for (let i = 2; i < argv.length; i++) {
     const key = argv[i];
     const val = argv[i + 1];
@@ -62,6 +65,9 @@ function parseArgs(argv) {
         args.minutes = parseFloat(val);
         i++;
         break;
+      case "--duo":
+        args.duo = true; // flag sin valor (v1.3): salas en modo duo, inputs con `b`
+        break;
       default:
         usageAndExit("argumento desconocido: " + key);
     }
@@ -70,6 +76,9 @@ function parseArgs(argv) {
   if (!Number.isInteger(args.rooms) || args.rooms < 1) usageAndExit("--rooms inválido");
   if (!Number.isInteger(args.players) || args.players < 2 || args.players > 8) {
     usageAndExit("--players debe estar entre 2 y 8");
+  }
+  if (args.duo && args.players > 4) {
+    usageAndExit("--players debe estar entre 2 y 4 con --duo (capacidad del modo)");
   }
   if (!Number.isFinite(args.minutes) || args.minutes <= 0) usageAndExit("--minutes inválido");
   return args;
@@ -127,7 +136,7 @@ class Bot {
     this.isHost = isHost;
     this.rand = mulberry32(0x9e3779b9 ^ Math.imul(globalIndex + 1, 2654435761));
     this.ws = null;
-    this.id = null;          // playerId asignado por el server
+    this.id = null;          // playerId (USUARIO) asignado por el server
     this.seq = 0;            // seq incremental de input (v1.2 A)
     this.playing = false;
     this.me = { x: 0, y: 0 };
@@ -136,6 +145,14 @@ class Bot {
     this.dirLeft = 0;        // s hasta el próximo cambio de dirección
     this.lastReadySent = 0;
     this.timers = [];
+    // --duo (v1.3): ids de los CUERPOS propios (del config de start) y estado del
+    // cuerpo B (posición + rumbo propio, mismo PRNG del bot: sigue determinista).
+    this.duo = !!room.args.duo;
+    this.bodyA = null;       // id del cuerpo slot 0 (= this.id en modos no-duo)
+    this.bodyB = null;       // id del cuerpo slot 1 (solo duo)
+    this.meB = { x: 0, y: 0 };
+    this.dirB = { mx: -1, my: 0 };
+    this.dirLeftB = 0;
   }
 
   connect() {
@@ -187,7 +204,12 @@ class Bot {
     switch (msg.type) {
       case "joined":
         this.id = msg.playerId;
-        if (this.isHost) this.room.onHostJoined(msg.room);
+        this.bodyA = msg.playerId; // en no-duo el cuerpo slot 0 comparte id con el usuario
+        if (this.isHost) {
+          // --duo: poner la sala en modo duo ANTES del ready (setMode resetea readies).
+          if (this.duo) this.send({ type: "setMode", mode: "duo" });
+          this.room.onHostJoined(msg.room);
+        }
         this.sendReady();
         break;
       case "lobby": {
@@ -200,21 +222,37 @@ class Bot {
         if (this.isHost) this.room.playing = false;
         break;
       }
-      case "start":
+      case "start": {
         this.playing = true;
         if (this.isHost) this.room.playing = true;
+        // v1.3: mapear los CUERPOS propios por owner/slot del config (en duo los
+        // ids de cuerpo son propios; en no-duo el slot 0 coincide con this.id).
+        this.bodyB = null;
+        const cfg = msg.config;
+        if (cfg && Array.isArray(cfg.players)) {
+          for (const bp of cfg.players) {
+            if (!bp || bp.owner !== this.id) continue;
+            if (bp.slot === 1) this.bodyB = bp.id;
+            else this.bodyA = bp.id;
+          }
+        }
         break;
+      }
       case "state": {
         if (msg.ball) {
           this.ball.x = Number(msg.ball.x) || 0;
           this.ball.y = Number(msg.ball.y) || 0;
         }
-        const me = Array.isArray(msg.players)
-          ? msg.players.find((p) => p && p.id === this.id)
-          : null;
-        if (me) {
-          this.me.x = Number(me.x) || 0;
-          this.me.y = Number(me.y) || 0;
+        const arr = Array.isArray(msg.players) ? msg.players : [];
+        for (const p of arr) {
+          if (!p) continue;
+          if (p.id === this.bodyA) {
+            this.me.x = Number(p.x) || 0;
+            this.me.y = Number(p.y) || 0;
+          } else if (this.bodyB !== null && p.id === this.bodyB) {
+            this.meB.x = Number(p.x) || 0;
+            this.meB.y = Number(p.y) || 0;
+          }
         }
         break;
       }
@@ -248,38 +286,54 @@ class Bot {
     this.send({ type: "ready", ready: true });
   }
 
+  // Rumbo nuevo para un cuerpo (60% de las veces persigue la pelota con jitter —
+  // garantiza patadas; 40% dirección al azar). Determinista: usa el PRNG del bot.
+  pickDir(dir, me) {
+    if (this.rand() < 0.6) {
+      const dx = this.ball.x - me.x;
+      const dy = this.ball.y - me.y;
+      const d = Math.hypot(dx, dy) || 1;
+      const mx = dx / d + (this.rand() - 0.5) * 0.6;
+      const my = dy / d + (this.rand() - 0.5) * 0.6;
+      const l = Math.hypot(mx, my) || 1;
+      dir.mx = mx / l;
+      dir.my = my / l;
+    } else {
+      const ang = this.rand() * Math.PI * 2;
+      dir.mx = Math.cos(ang);
+      dir.my = Math.sin(ang);
+    }
+  }
+
   // Movimiento pseudoaleatorio determinista a 20 Hz: cada 0.3–1.5 s elige rumbo
-  // nuevo (60% de las veces persigue la pelota con jitter — garantiza patadas);
-  // kick:true cuando la pelota está cerca (el cooldown lo aplica el server).
+  // nuevo por cuerpo; kick:true cuando la pelota está cerca (el cooldown lo aplica
+  // el server). Con --duo el mensaje lleva además el objeto `b` del cuerpo slot 1.
   tickInput() {
     if (!this.playing) return;
     this.dirLeft -= 1 / INPUT_HZ;
     if (this.dirLeft <= 0) {
       this.dirLeft = 0.3 + this.rand() * 1.2;
-      if (this.rand() < 0.6) {
-        const dx = this.ball.x - this.me.x;
-        const dy = this.ball.y - this.me.y;
-        const d = Math.hypot(dx, dy) || 1;
-        const mx = dx / d + (this.rand() - 0.5) * 0.6;
-        const my = dy / d + (this.rand() - 0.5) * 0.6;
-        const l = Math.hypot(mx, my) || 1;
-        this.dir.mx = mx / l;
-        this.dir.my = my / l;
-      } else {
-        const ang = this.rand() * Math.PI * 2;
-        this.dir.mx = Math.cos(ang);
-        this.dir.my = Math.sin(ang);
-      }
+      this.pickDir(this.dir, this.me);
     }
     const near = Math.hypot(this.ball.x - this.me.x, this.ball.y - this.me.y) <= KICK_DIST;
-    this.send({
+    const msg = {
       type: "input",
       seq: ++this.seq,
       mx: this.dir.mx,
       my: this.dir.my,
       kick: near,
       tackle: false,
-    });
+    };
+    if (this.duo && this.bodyB !== null) {
+      this.dirLeftB -= 1 / INPUT_HZ;
+      if (this.dirLeftB <= 0) {
+        this.dirLeftB = 0.3 + this.rand() * 1.2;
+        this.pickDir(this.dirB, this.meB);
+      }
+      const nearB = Math.hypot(this.ball.x - this.meB.x, this.ball.y - this.meB.y) <= KICK_DIST;
+      msg.b = { mx: this.dirB.mx, my: this.dirB.my, kick: nearB, tackle: false };
+    }
+    this.send(msg);
   }
 
   send(msg) {
@@ -347,7 +401,8 @@ console.log(
     args.rooms * args.players +
     " conexiones) | " +
     args.minutes +
-    " min"
+    " min" +
+    (args.duo ? " | modo DUO (inputs dobles)" : "")
 );
 
 const roomCtls = [];

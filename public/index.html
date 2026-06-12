@@ -101,6 +101,7 @@
               <option value="ffa">⚔️ Todos contra todos</option>
               <option value="1v1">🥊 1 vs 1</option>
               <option value="2v2">🤝 2 vs 2</option>
+              <option value="duo">🎮 Dúo (2 jugadores c/u)</option>
             </select>
           </div>
           <div class="config-field">
@@ -111,6 +112,21 @@
               <option value="playa">🏖️ Playa</option>
               <option value="nieve">❄️ Nieve</option>
             </select>
+          </div>
+          <div class="config-field config-field-match">
+            <label class="field-label" for="match-target-select">Partido a</label>
+            <div class="match-row">
+              <select id="match-target-select" class="select" aria-label="Tipo de objetivo del partido">
+                <option value="goals" selected>🥅 Goles</option>
+                <option value="time">⏱️ Tiempo</option>
+              </select>
+              <select id="match-value-select" class="select" aria-label="Objetivo del partido">
+                <option value="1">1 gol</option>
+                <option value="3" selected>3 goles</option>
+                <option value="5">5 goles</option>
+                <option value="10">10 goles</option>
+              </select>
+            </div>
           </div>
         </div>
 
@@ -151,7 +167,28 @@
 
       <div id="scoreboard" class="scoreboard" aria-live="polite"></div>
 
+      <div id="match-clock" class="match-clock hidden" aria-live="off"></div>
+
       <div id="overlay" class="overlay" aria-live="assertive"></div>
+
+      <div id="duo-keys-hint" class="duo-keys-hint hidden" aria-hidden="true">
+        <div class="duo-keys-card">
+          <p class="duo-keys-title">🎮 Modo Dúo — controlás 2 cuerpos</p>
+          <div class="duo-keys-cols">
+            <div class="duo-keys-col">
+              <p class="duo-keys-body">Cuerpo A</p>
+              <p class="duo-keys-map"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> mover</p>
+              <p class="duo-keys-map"><kbd>F</kbd> patear · <kbd>G</kbd> barrer</p>
+            </div>
+            <div class="duo-keys-divider" aria-hidden="true"></div>
+            <div class="duo-keys-col">
+              <p class="duo-keys-body body-b">Cuerpo B ②</p>
+              <p class="duo-keys-map"><kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd> mover</p>
+              <p class="duo-keys-map"><kbd>L</kbd> patear · <kbd>K</kbd> barrer</p>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <button id="btn-game-options" class="gear-btn gear-btn-game" type="button" aria-label="Opciones" title="Opciones">⚙️</button>
 

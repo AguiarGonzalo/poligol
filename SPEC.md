@@ -532,3 +532,113 @@ tick medio < 8 ms y sin crecimiento de memoria. Cambios server:
 - `listRooms` se mantiene. `state` con campos ausentes = 0 (cliente nuevo lo asume).
 - Constantes nuevas (ACCEL/FRICTION/KICK_RANGE) deben quedar IDÉNTICAS en server.js y
   client.js (la predicción depende de eso).
+
+---
+
+# v1.3 — CAMBIOS (este bloque PISA a v1, v1.1 y v1.2 donde los contradiga)
+
+Dos features: **modo DÚO** (un usuario maneja 2 jugadores con dos joysticks) y
+**objetivo de partido configurable** (a X goles o a X minutos, con gol de oro).
+
+## A. Concepto: USUARIOS vs CUERPOS
+
+Hasta v1.2, 1 usuario = 1 jugador físico. Desde v1.3 un usuario puede controlar
+1 o 2 "cuerpos" (jugadores físicos). El lobby siempre lista USUARIOS. La física,
+colisiones, botines, stun, etc. operan sobre CUERPOS sin cambios.
+
+- Modos existentes (ffa/1v1/2v2): 1 cuerpo por usuario, todo igual que v1.2.
+- **Modo nuevo `duo`**: 2–4 usuarios, cada usuario es UN EQUIPO con DOS cuerpos.
+  Cantidad de arcos n = cantidad de usuarios (2 → rectángulo, 3 → triángulo,
+  4 → cuadrado — misma geometría de siempre con n = equipos). Capacidad de sala
+  en duo: 4 usuarios máx (8 cuerpos = MAX_PLAYERS). setTeam deshabilitado
+  (cada usuario ES su equipo); #teams-panel oculto en duo.
+- IDs: los cuerpos usan ids únicos propios. En `start`, cada cuerpo declara:
+  `{id, name, country, team, owner, slot}` — owner = id de usuario (el playerId
+  de `joined`), slot = 0 (cuerpo A) | 1 (cuerpo B). En modos no-duo: slot 0 y
+  owner = el propio usuario, SIEMPRE presentes (uniforme).
+- Spawns duo: los 2 cuerpos del equipo k en el spawn v1 de su lado, separados
+  ±55 perpendicular a la dirección centro→arco.
+- Puntaje por EQUIPO igual que v1.2 (scores array). lastTouch = cuerpo; el gol
+  suma al EQUIPO del cuerpo que tocó último (gol en contra de tu propio equipo
+  solo resta, aunque lo meta tu cuerpo B).
+
+## B. Protocolo input DUO (compatible)
+
+`{type:"input", seq, mx, my, kick, tackle, b:{mx, my, kick, tackle}}`
+- En duo: los campos planos controlan el cuerpo slot 0; el objeto `b` (opcional,
+  mismas validaciones/clamps) controla el slot 1. Sin `b` → el cuerpo B mantiene
+  su último input de movimiento = 0 (quieto), sin acciones.
+- En modos no-duo el server IGNORA `b`.
+- UN solo `seq` por mensaje cubre ambos cuerpos; `iq` viaja en AMBOS cuerpos
+  propios con el mismo valor. Cooldowns/kick-buffer/facing/stun por cuerpo.
+- Predicción v1.2 extendida: el cliente simula y reconcilia LOS DOS cuerpos
+  propios (pendingInputs guarda a y b por entrada); pelota y rivales interpolados
+  igual. El render de AMBOS cuerpos propios usa la predicción.
+
+## C. Controles DUO
+
+**Táctil (lo pedido por el usuario):** la pantalla se parte en DOS ZONAS (mitad
+izquierda = cuerpo A, mitad derecha = cuerpo B). En cada zona, un joystick
+dinámico independiente (aparece donde toca el dedo, igual que v1.2, uno por zona,
+multitouch simultáneo con touch identifiers):
+- **Mantener y arrastrar** = mover ese cuerpo.
+- **TAP** (touchstart→touchend con duración < 220 ms Y desplazamiento total
+  < 12 px) = PATEAR con ese cuerpo. Es exactamente "levanto el dedo y aprieto de
+  nuevo → patea": el tap no mueve, patea.
+- **DOBLE TAP** (segundo tap ≤ 300 ms después del primero) = BARRIDA de ese
+  cuerpo (el primer tap ya habrá pateado; está bien — patada y luego barrida).
+- En duo táctil los botones ⚽/🦵 se OCULTAN (las zonas cubren todo).
+- En los modos no-duo, el joystick y botones v1.2 quedan IGUALES.
+
+**Teclado:** cuerpo A = WASD + `F` patear + `G` barrer; cuerpo B = flechas +
+`L` patear + `K` barrer. Al entrar a un partido duo por teclado, mostrar 3 s un
+hint overlay con el mapeo (#duo-keys-hint, se oculta solo).
+
+**Identificación visual:** el halo del cuerpo propio v1.1 se mantiene en A
+(dorado) y B lleva halo plateado/celeste + marca "②" junto al nombre. Etiqueta
+de nombre en ambos cuerpos (B con "②").
+
+## D. Objetivo de partido configurable (host)
+
+- `{type:"setMatch", target:"goals"|"time", value}` — solo host, solo lobby.
+  Whitelist: goals → value ∈ {1,3,5,10} (default 3); time → value ∈ {120,180,
+  300,600} segundos. Cambiarlo NO resetea readies. Inválido → error.
+- `lobby` gana campos `target` y `value`. `rooms` (cards) también, y el cliente
+  muestra chip ("a 3 goles" / "5 min").
+- **target=goals**: gana el primer equipo en llegar a `value` (igual que siempre
+  pero configurable).
+- **target=time**: el state gana `tl` = segundos restantes (entero, redondeo
+  techo, presente SOLO en target=time). El reloj corre únicamente con la pelota
+  en juego (no durante GOAL_PAUSE ni countdown). Al llegar a 0:
+  - Si hay un único líder → `gameover` normal (winnerTeam = líder).
+  - Si hay empate en la cima → `{type:"golden"}` (broadcast) y sigue el juego en
+    **GOL DE ORO**: el próximo gol de CUALQUIER equipo termina el partido al
+    instante (gameover tras el evento goal). En golden, `tl` se omite.
+- `gameover` gana campo `reason`: "goals" | "time" | "golden".
+- UI lobby: junto a modo/estadio, dos selects del host: `#match-target-select`
+  (Goles | Tiempo) y `#match-value-select` (opciones según target: 1/3/5/10
+  goles ó 2/3/5/10 min). No-host: deshabilitados, muestran el valor actual.
+- UI juego: `#match-clock` (mm:ss, visible solo target=time, arriba centro bajo
+  el scoreboard; en gol de oro muestra "GOL DE ORO" en dorado pulsante).
+  El overlay de gol de oro usa el #overlay existente para anunciarlo (2 s).
+
+## E. Detalles server
+
+- `modeCapacity("duo")` = 4 (usuarios). Mínimo para arrancar: 2 usuarios, todos
+  ready (sistema v1.1 sin cambios).
+- Crear cuerpos al armar el partido (start), no en el lobby. Desconexión de un
+  usuario en partido: aborta como siempre (sus 2 cuerpos desaparecen).
+- Rate limit y validaciones: `b` con los mismos clamps que los campos planos;
+  mensajes input siguen contando 1 para el rate limit.
+- El relator y los SFX tratan cada gol por el nombre del USUARIO dueño del
+  cuerpo que metió el gol.
+- /metrics: `players` cuenta CONEXIONES (usuarios), agregar `bodies` (cuerpos en
+  juego).
+
+## F. Reglas de compatibilidad
+
+- Cliente v1.2 contra server v1.3: funciona en modos no-duo (b ignorado, target
+  default goals/3, tl ausente). No se exige más que eso.
+- TODO lo demás de v1.2 (predicción, push de salas, packs de voz, métricas,
+  loadtest) queda intacto. tools/loadtest.js: agregar flag opcional `--duo`
+  (las salas se crean en modo duo con inputs dobles) sin romper el modo default.

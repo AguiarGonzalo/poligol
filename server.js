@@ -15,7 +15,15 @@
  * global a 60 Hz para todas las salas en juego (un solo stringify por sala por
  * broadcast), GET /health y /metrics (ventana móvil de 10 s), y límites anti-abuso
  * (MAX_CONN, máx 1000 salas, rate limit de mensajes por conexión).
- * Implementa el contrato definido en SPEC.md (v1 + v1.1 + v1.2) al pie de la letra.
+ * v1.3 (secciones A/B/D/E del SPEC): separación USUARIOS (conexiones, lobby, equipos)
+ * vs CUERPOS (jugadores físicos, creados en start con owner/slot SIEMPRE presentes);
+ * modo "duo" (2–4 usuarios, cada usuario es un equipo con DOS cuerpos: los campos
+ * planos del input controlan el slot 0 y el objeto `b` opcional el slot 1, con un
+ * solo seq por mensaje e iq duplicado en ambos cuerpos propios); objetivo de partido
+ * configurable con setMatch (target "goals"|"time" + whitelist de values), reloj `tl`
+ * en state (solo target=time, corre solo con pelota en juego), GOL DE ORO al empatar
+ * y campo reason ("goals"|"time"|"golden") en gameover; /metrics gana `bodies`.
+ * Implementa el contrato definido en SPEC.md (v1 + v1.1 + v1.2 + v1.3) al pie de la letra.
  */
 
 "use strict";
@@ -93,8 +101,18 @@ const RATE_LIMIT_MAX = 90;         // mensajes por ventana
 const RATE_LIMIT_WINDOW_MS = 1000; // ventana del rate limit
 const METRICS_WINDOW_MS = 10000;   // E.4: ventana móvil de las métricas de tick (10 s)
 
-// Lobby / salas v1.1
-const MODES = ["ffa", "1v1", "2v2"];
+/* ============================ Constantes v1.3 (SPEC) ============================= */
+
+// USUARIOS vs CUERPOS (sección A): en modo "duo" cada usuario controla 2 cuerpos.
+const DUO_BODIES = 2;            // cuerpos por usuario en duo (slots 0 y 1)
+const DUO_CAPACITY = 4;          // duo: 4 usuarios máx (8 cuerpos = MAX_PLAYERS)
+const DUO_SPAWN_D = 55;          // duo: cuerpos separados ±55 perpendicular a centro→arco
+// Objetivo de partido configurable (sección D, setMatch solo host): whitelist EXACTA.
+const MATCH_GOALS_VALUES = [1, 3, 5, 10];       // target "goals" (default 3 = WIN_SCORE)
+const MATCH_TIME_VALUES = [120, 180, 300, 600]; // target "time", en segundos
+
+// Lobby / salas v1.1 (+ "duo" v1.3)
+const MODES = ["ffa", "1v1", "2v2", "duo"];
 const STADIUMS = ["clasico", "noche", "playa", "nieve"];
 const MAX_ROOM_NAME_LEN = 24;     // roomName sanitizado a ≤ 24 chars (SPEC)
 const START_COUNTDOWN_S = 3;      // auto-arranque: "starting" y partido 3 s después
@@ -318,6 +336,8 @@ function broadcastLobby(room, notice) {
     visibility: room.visibility,
     mode: room.mode,
     stadium: room.stadium,
+    target: room.target, // objetivo de partido (v1.3 D): "goals" | "time"
+    value: room.value,   // goles objetivo o segundos, según target
     players: room.players.map((p, i) => ({
       id: p.id,
       name: p.name,
@@ -333,10 +353,12 @@ function broadcastLobby(room, notice) {
 
 /* ====================== Modos, equipos y auto-arranque (v1.1) ===================== */
 
-// Cupo de la sala según el modo: ffa 2–8, 1v1 exactamente 2, 2v2 exactamente 4.
+// Cupo de la sala según el modo (en USUARIOS): ffa 2–8, 1v1 exactamente 2,
+// 2v2 exactamente 4, duo 2–4 (v1.3: 4 usuarios = 8 cuerpos = MAX_PLAYERS).
 function modeCapacity(mode) {
   if (mode === "1v1") return 2;
   if (mode === "2v2") return 4;
+  if (mode === "duo") return DUO_CAPACITY;
   return MAX_PLAYERS;
 }
 
@@ -348,8 +370,9 @@ function teamCount(room, team) {
   return c;
 }
 
-// Reasignación completa (al cambiar de modo): ffa/1v1 cada jugador es un equipo de 1
-// (equipo = índice de llegada); 2v2 asignación automática ALTERNADA por orden de llegada.
+// Reasignación completa (al cambiar de modo): ffa/1v1/duo cada USUARIO es un equipo
+// (equipo = índice de llegada; en duo cada usuario ES su equipo y setTeam se rechaza);
+// 2v2 asignación automática ALTERNADA por orden de llegada.
 function assignTeams(room) {
   room.players.forEach((p, i) => {
     p.team = room.mode === "2v2" ? i % 2 : i;
@@ -390,6 +413,7 @@ function readyToStart(room) {
   if (room.mode === "2v2") {
     return cnt === 4 && teamCount(room, 0) === 2 && teamCount(room, 1) === 2;
   }
+  if (room.mode === "duo") return cnt >= MIN_PLAYERS && cnt <= DUO_CAPACITY; // 2–4 usuarios (v1.3 E)
   return cnt >= MIN_PLAYERS && cnt <= MAX_PLAYERS; // ffa
 }
 
@@ -547,9 +571,10 @@ function buildWalls(n) {
 function startMatch(room) {
   stopCountdown(room);
 
-  // EQUIPOS (v1.1): el índice del equipo = índice de lado/arco. En ffa/1v1 cada
-  // jugador es un equipo de 1 (orden de llegada); en 2v2 son 2 equipos de 2 según
-  // la asignación del lobby. n = CANTIDAD DE EQUIPOS (geometría v1 con ese n).
+  // EQUIPOS (v1.1/v1.3): el índice del equipo = índice de lado/arco. En ffa/1v1
+  // cada usuario es un equipo de 1 (orden de llegada); en 2v2 son 2 equipos de 2
+  // según la asignación del lobby; en duo cada USUARIO es un equipo con DOS cuerpos
+  // (v1.3 A). n = CANTIDAD DE EQUIPOS (geometría v1 con ese n).
   let teamLists;
   if (room.mode === "2v2") {
     teamLists = [
@@ -566,10 +591,14 @@ function startMatch(room) {
 
   const n = teamLists.length;
   const walls = buildWalls(n);
-  const order = room.players.slice();
-  const spawns = new Map(); // playerId → {x, y, fx, fy}
-  const bodies = new Map();
-  const playerTeam = new Map(); // playerId → índice de equipo
+  // CUERPOS (v1.3 A/E): se crean ACÁ, al armar el partido (no en el lobby). 1 por
+  // usuario en ffa/1v1/2v2 (id del cuerpo = id de usuario: compat clientes v1.2) o
+  // 2 por usuario en duo (ids únicos propios "p3a"/"p3b", slots 0 y 1). owner y slot
+  // van SIEMPRE en start (uniforme). state.players = este array de cuerpos.
+  const perUser = room.mode === "duo" ? DUO_BODIES : 1;
+  const bodies = [];              // todos los cuerpos (orden: equipo, usuario, slot)
+  const bodyById = new Map();     // bodyId → cuerpo (lastTouch / goles / slide)
+  const bodiesByUser = new Map(); // userId → [cuerpo slot 0, (cuerpo slot 1)]
   const scores = new Array(n).fill(0);
 
   for (let k = 0; k < n; k++) {
@@ -579,52 +608,82 @@ function startMatch(room) {
     const members = teamLists[k];
 
     for (let j = 0; j < members.length; j++) {
-      // Spawns 2v2: compañeros en el x de spawn v1 y separados ±90 en y (SPEC).
-      const dy = members.length === 2 ? (j === 0 ? -TEAM_SPAWN_DY : TEAM_SPAWN_DY) : 0;
-      // Facing inicial: hacia el centro (= −normal exterior del arco propio).
-      const spawn = { x: baseX, y: baseY + dy, fx: -goalWall.nx, fy: -goalWall.ny };
       const p = members[j];
-      spawns.set(p.id, spawn);
-      playerTeam.set(p.id, k);
-      bodies.set(p.id, {
-        x: spawn.x,
-        y: spawn.y,
-        vx: 0,
-        vy: 0,
-        fx: spawn.fx,
-        fy: spawn.fy,
-        stun: 0,
-        kc: 0,
-        tc: 0,
-        kickBuf: 0,      // v1.2: s restantes del KICK BUFFER (intención de patear)
-        slide: 0,        // s restantes de barrida (0 si no) — va en state (v1.1)
-        sdx: 0,          // dirección fija del slide
-        sdy: 0,
-        slideHit: null,  // Set de ids de rivales ya conectados por este slide
-        slideBall: false, // la pelota ya recibió el impulso de este slide
-        ix: 0,
-        iy: 0,
-        wantKick: false,
-        wantTackle: false,
-      });
+      const userBodies = [];
+      bodiesByUser.set(p.id, userBodies);
+
+      for (let slot = 0; slot < perUser; slot++) {
+        let sx = baseX;
+        let sy = baseY;
+        if (perUser === DUO_BODIES) {
+          // Spawns duo (v1.3 A): los 2 cuerpos del equipo en el spawn v1 de su
+          // lado, separados ±55 PERPENDICULAR a la dirección centro→arco (que es
+          // la normal exterior del arco propio).
+          const off = slot === 0 ? -DUO_SPAWN_D : DUO_SPAWN_D;
+          sx += -goalWall.ny * off;
+          sy += goalWall.nx * off;
+        } else if (members.length === 2) {
+          // Spawns 2v2: compañeros en el x de spawn v1 y separados ±90 en y (SPEC).
+          sy += j === 0 ? -TEAM_SPAWN_DY : TEAM_SPAWN_DY;
+        }
+        const body = {
+          id: perUser === DUO_BODIES ? p.id + (slot === 0 ? "a" : "b") : p.id,
+          owner: p.id,   // id del USUARIO dueño (el playerId de `joined`)
+          ownerRef: p,   // referencia al usuario: iq del state = ownerRef.lastSeq
+          slot,          // 0 (cuerpo A) | 1 (cuerpo B)
+          name: p.name,
+          country: p.country,
+          team: k,
+          // Spawn propio del cuerpo. Facing inicial: hacia el centro (= −normal
+          // exterior del arco propio).
+          spawn: { x: sx, y: sy, fx: -goalWall.nx, fy: -goalWall.ny },
+          x: sx,
+          y: sy,
+          vx: 0,
+          vy: 0,
+          fx: -goalWall.nx,
+          fy: -goalWall.ny,
+          // v1.3 B: cooldowns, kick-buffer, facing, stun y slide son POR CUERPO.
+          stun: 0,
+          kc: 0,
+          tc: 0,
+          kickBuf: 0,      // v1.2: s restantes del KICK BUFFER (intención de patear)
+          slide: 0,        // s restantes de barrida (0 si no) — va en state (v1.1)
+          sdx: 0,          // dirección fija del slide
+          sdy: 0,
+          slideHit: null,  // Set de ids de CUERPOS rivales ya conectados por este slide
+          slideBall: false, // la pelota ya recibió el impulso de este slide
+          ix: 0,
+          iy: 0,
+          wantKick: false,
+          wantTackle: false,
+        };
+        bodies.push(body);
+        bodyById.set(body.id, body);
+        userBodies.push(body);
+      }
     }
   }
 
   room.match = {
     n,
-    order,
-    teamLists,
     walls,
-    spawns,
     bodies,
+    bodyById,
+    bodiesByUser,
     scores,
-    playerTeam,
     phys: stadiumPhysics(room.stadium), // multiplicadores del estadio (v1.1)
     ball: { x: 0, y: 0, vx: 0, vy: 0 },
-    lastTouch: null,
+    lastTouch: null, // id del CUERPO del último toque, o null (v1.3 A)
     paused: false,
     pauseLeft: 0,
     winnerTeam: null,
+    // Objetivo del partido (v1.3 D): snapshot del lobby, fijo durante el partido.
+    target: room.target,
+    value: room.value,
+    timeLeft: room.target === "time" ? room.value : 0, // s restantes (float interno)
+    golden: false,   // true = GOL DE ORO (empate en la cima al agotarse el tiempo)
+    endReason: null, // "goals" | "time" | "golden" → campo reason del gameover
   };
   room.status = "playing";
   room.tickCount = 0;
@@ -635,8 +694,20 @@ function startMatch(room) {
       mode: room.mode,
       stadium: room.stadium,
       n, // n === teams.length; el arco k pertenece al equipo k
-      teams: teamLists.map((members) => ({ players: members.map((p) => p.id), score: 0 })),
-      players: order.map((p) => ({ id: p.id, name: p.name, country: p.country, team: p.team })),
+      // teams.players y players listan CUERPOS (v1.3 A): en no-duo coinciden 1:1
+      // con los usuarios (id = playerId, slot 0, owner = el propio usuario).
+      teams: teamLists.map((members) => ({
+        players: members.flatMap((p) => bodiesByUser.get(p.id).map((b) => b.id)),
+        score: 0,
+      })),
+      players: bodies.map((b) => ({
+        id: b.id,
+        name: b.name,
+        country: b.country,
+        team: b.team,
+        owner: b.owner,
+        slot: b.slot,
+      })),
     },
   });
 
@@ -646,9 +717,8 @@ function startMatch(room) {
 }
 
 function resetPositions(m) {
-  for (const p of m.order) {
-    const b = m.bodies.get(p.id);
-    const sp = m.spawns.get(p.id);
+  for (const b of m.bodies) {
+    const sp = b.spawn;
     b.x = sp.x;
     b.y = sp.y;
     b.vx = 0;
@@ -687,14 +757,14 @@ function clampBallSpeed(ball) {
 // Con el KICK BUFFER (sección A) el intento fuera de rango ya NO quema el cooldown:
 // queda bufferedo en b.kickBuf y se ejecuta en el primer tick en que la pelota entra
 // en rango dentro de los 160 ms (si el buffer expira sin conectar, no pasa nada).
-function tryKick(m, playerId, b) {
+function tryKick(m, b) {
   const dist = Math.hypot(m.ball.x - b.x, m.ball.y - b.y);
   if (dist > KICK_RANGE) return false;
   b.kc = KICK_COOLDOWN;
   m.ball.vx = b.fx * KICK_POWER + KICK_VEL_FACTOR * b.vx;
   m.ball.vy = b.fy * KICK_POWER + KICK_VEL_FACTOR * b.vy;
   clampBallSpeed(m.ball);
-  m.lastTouch = playerId;
+  m.lastTouch = b.id; // lastTouch = CUERPO (v1.3 A)
   return true;
 }
 
@@ -717,17 +787,17 @@ function startSlide(b) {
   b.slideBall = false;
 }
 
-// Conexión del slide (se evalúa cada tick mientras dura): cada RIVAL (otro equipo)
-// en rango recibe knockback SLIDE_KNOCKBACK + stun TACKLE_STUN una sola vez por
-// slide; la pelota en rango sale a 0.6 × SLIDE_KNOCKBACK (una vez por slide).
-function slideConnect(m, p, b) {
-  const myTeam = m.playerTeam.get(p.id);
+// Conexión del slide (se evalúa cada tick mientras dura): cada CUERPO RIVAL (otro
+// equipo) en rango recibe knockback SLIDE_KNOCKBACK + stun TACKLE_STUN una sola vez
+// por slide; la pelota en rango sale a 0.6 × SLIDE_KNOCKBACK (una vez por slide).
+// Compañeros y el otro cuerpo del MISMO usuario (duo) no se barren (mismo equipo).
+function slideConnect(m, b) {
+  const myTeam = b.team;
 
-  for (const q of m.order) {
-    if (q.id === p.id) continue;
-    if (m.playerTeam.get(q.id) === myTeam) continue; // los compañeros no se barren
-    if (b.slideHit.has(q.id)) continue;
-    const qb = m.bodies.get(q.id);
+  for (const qb of m.bodies) {
+    if (qb === b) continue;
+    if (qb.team === myTeam) continue; // compañeros (y el cuerpo B propio) no se barren
+    if (b.slideHit.has(qb.id)) continue;
     const dx = qb.x - b.x;
     const dy = qb.y - b.y;
     const d = Math.hypot(dx, dy);
@@ -745,7 +815,7 @@ function slideConnect(m, p, b) {
       qb.vy += ny * SLIDE_KNOCKBACK;
       qb.stun = TACKLE_STUN;
       qb.slide = 0; // el stun corta el slide del rival barrido
-      b.slideHit.add(q.id);
+      b.slideHit.add(qb.id);
     }
   }
 
@@ -766,7 +836,7 @@ function slideConnect(m, p, b) {
       m.ball.vx += nx * SLIDE_BALL_FACTOR * SLIDE_KNOCKBACK;
       m.ball.vy += ny * SLIDE_BALL_FACTOR * SLIDE_KNOCKBACK;
       clampBallSpeed(m.ball);
-      m.lastTouch = p.id;
+      m.lastTouch = b.id; // lastTouch = CUERPO (v1.3 A)
       b.slideBall = true;
     }
   }
@@ -774,21 +844,30 @@ function slideConnect(m, p, b) {
 
 function onGoal(room, concededTeam) {
   const m = room.match;
-  const lt = m.lastTouch; // playerId del último toque, o null
-  const ltTeam = lt !== null && m.playerTeam.has(lt) ? m.playerTeam.get(lt) : null;
-  // Gol en contra: el último toque fue de un jugador del equipo que recibe
-  // (incluye a un compañero en 2v2): solo resta, nadie suma (SPEC v1.1).
+  const lt = m.lastTouch; // id del CUERPO del último toque, o null (v1.3 A)
+  const ltBody = lt !== null ? m.bodyById.get(lt) : null;
+  const ltTeam = ltBody ? ltBody.team : null;
+  // Gol en contra: el último toque fue de un cuerpo del EQUIPO que recibe (incluye
+  // a un compañero en 2v2 y al cuerpo B del propio usuario en duo): solo resta,
+  // nadie suma (SPEC v1.1/v1.3 — el gol suma al EQUIPO del dueño del cuerpo).
   const ownGoal = ltTeam !== null && ltTeam === concededTeam;
   const scorerTeam = ltTeam !== null && ltTeam !== concededTeam ? ltTeam : null;
-  // scorerId = jugador que tocó último la pelota (autor físico del gol); en un gol
+  // scorerId = cuerpo que tocó último la pelota (autor físico del gol); en un gol
   // en contra identifica al que lo metió (scorerTeam queda null: nadie suma).
   const scorerId = ltTeam !== null ? lt : null;
 
   m.scores[concededTeam] -= 1;
   if (scorerTeam !== null) m.scores[scorerTeam] += 1;
 
-  for (let t = 0; t < m.scores.length; t++) {
-    if (m.scores[t] >= WIN_SCORE) m.winnerTeam = t;
+  // target=goals (v1.3 D): gana el primer equipo en llegar a `value` (default 3).
+  // En target=time los goles no terminan el partido (lo termina el reloj o el oro).
+  if (m.target === "goals") {
+    for (let t = 0; t < m.scores.length; t++) {
+      if (m.scores[t] >= m.value) {
+        m.winnerTeam = t;
+        m.endReason = "goals";
+      }
+    }
   }
 
   // La pelota desaparece durante la pausa (el cliente la oculta con paused=true).
@@ -808,16 +887,66 @@ function onGoal(room, concededTeam) {
     ownGoal,
     scores: m.scores.slice(),
   });
+
+  // GOL DE ORO (v1.3 D): el próximo gol de CUALQUIER equipo termina el partido AL
+  // INSTANTE (gameover inmediatamente después del evento goal, sin GOAL_PAUSE ni
+  // kickoff). Ganador: el líder tras el gol; si el gol no dejó un líder único (gol
+  // en contra con 3+ equipos empatados en la cima), desempate determinista: el
+  // equipo que metió el gol si está en la cima, si no el líder de menor índice.
+  if (m.golden) {
+    let max = -Infinity;
+    for (const s of m.scores) {
+      if (s > max) max = s;
+    }
+    let winner = m.scores.indexOf(max);
+    if (scorerTeam !== null && m.scores[scorerTeam] === max) winner = scorerTeam;
+    m.winnerTeam = winner;
+    endMatch(room, "golden");
+  }
+}
+
+// Final del partido (v1.3 D: reason = "goals" | "time" | "golden"). El pase de
+// status a "gameover" saca a la sala del loop global de ticks (v1.2 E.3).
+function endMatch(room, reason) {
+  const m = room.match;
+  room.status = "gameover";
+  m.paused = true;
+  m.endReason = reason;
+  broadcastState(room);
+  broadcast(room, {
+    type: "gameover",
+    winnerTeam: m.winnerTeam,
+    scores: m.scores.slice(),
+    reason,
+  });
+}
+
+// target=time (v1.3 D): el reloj llegó a 0 con la pelota en juego. Líder único →
+// gameover normal (reason "time"); empate en la cima → {type:"golden"} (broadcast)
+// y el juego SIGUE en GOL DE ORO (tl se omite del state desde acá).
+function timeUp(room) {
+  const m = room.match;
+  let max = -Infinity;
+  for (const s of m.scores) {
+    if (s > max) max = s;
+  }
+  const leaders = [];
+  for (let t = 0; t < m.scores.length; t++) {
+    if (m.scores[t] === max) leaders.push(t);
+  }
+  if (leaders.length === 1) {
+    m.winnerTeam = leaders[0];
+    endMatch(room, "time");
+  } else {
+    m.golden = true;
+    broadcast(room, { type: "golden" });
+  }
 }
 
 function endPause(room) {
   const m = room.match;
   if (m.winnerTeam !== null) {
-    // status → "gameover" saca a la sala del loop global de ticks (v1.2 E.3).
-    room.status = "gameover";
-    m.paused = true;
-    broadcastState(room);
-    broadcast(room, { type: "gameover", winnerTeam: m.winnerTeam, scores: m.scores.slice() });
+    endMatch(room, m.endReason || "goals");
   } else {
     resetPositions(m);
     m.paused = false;
@@ -836,18 +965,19 @@ function endPause(room) {
 function broadcastState(room) {
   const m = room.match;
   if (!m) return;
+  // v1.3 A/B: state.players = CUERPOS. iq = lastSeq del USUARIO dueño: en duo viaja
+  // el MISMO valor en ambos cuerpos propios (un solo seq por mensaje de input).
   const players = [];
-  for (const p of m.order) {
-    const b = m.bodies.get(p.id);
+  for (const b of m.bodies) {
     const o = {
-      id: p.id,
+      id: b.id,
       x: r1(b.x),
       y: r1(b.y),
       vx: r1(b.vx),
       vy: r1(b.vy),
       fx: r2(b.fx),
       fy: r2(b.fy),
-      iq: p.lastSeq,
+      iq: b.ownerRef.lastSeq,
     };
     const stun = r2(b.stun);
     const kc = r2(b.kc);
@@ -857,13 +987,17 @@ function broadcastState(room) {
     if (slide > 0) o.slide = slide;
     players.push(o);
   }
-  const data = JSON.stringify({
+  const snap = {
     type: "state",
     ball: { x: r1(m.ball.x), y: r1(m.ball.y), vx: r1(m.ball.vx), vy: r1(m.ball.vy) },
     players,
     scores: m.scores.slice(),
     paused: m.paused,
-  });
+  };
+  // v1.3 D: tl = segundos restantes (entero, redondeo TECHO), presente SOLO en
+  // target=time; en GOL DE ORO se omite.
+  if (m.target === "time" && !m.golden) snap.tl = Math.ceil(m.timeLeft);
+  const data = JSON.stringify(snap);
   for (const p of room.players) {
     const ws = p.ws;
     if (ws.readyState !== WebSocket.OPEN) continue;
@@ -884,9 +1018,8 @@ function tickRoom(room) {
   const dt = TICK;
   const phys = m.phys; // constantes efectivas del estadio (v1.1)
 
-  /* ---- Jugadores: cooldowns, stun, slide, acciones y movimiento (Euler semi-impl.) ---- */
-  for (const p of m.order) {
-    const b = m.bodies.get(p.id);
+  /* ---- Cuerpos: cooldowns, stun, slide, acciones y movimiento (Euler semi-impl.) ---- */
+  for (const b of m.bodies) {
     const stunned = b.stun > 0;
     if (stunned) b.stun = Math.max(0, b.stun - dt);
     if (b.kc > 0) b.kc = Math.max(0, b.kc - dt);
@@ -899,7 +1032,7 @@ function tickRoom(room) {
     // ya mismo, como antes). Expirado el buffer, el intento se descarta sin cooldown.
     if (!stunned && b.slide <= 0 && !m.paused) {
       if (b.wantKick) b.kickBuf = KICK_BUFFER;
-      if (b.kickBuf > 0 && b.kc <= 0 && tryKick(m, p.id, b)) b.kickBuf = 0;
+      if (b.kickBuf > 0 && b.kc <= 0 && tryKick(m, b)) b.kickBuf = 0;
       if (b.wantTackle && b.tc <= 0) startSlide(b);
     }
     b.wantKick = false;
@@ -914,7 +1047,7 @@ function tickRoom(room) {
         // Slide (v1.1): velocidad fija hacia la dirección de barrida, sin control.
         b.vx = b.sdx * SLIDE_SPEED;
         b.vy = b.sdy * SLIDE_SPEED;
-        slideConnect(m, p, b);
+        slideConnect(m, b);
         b.slide = Math.max(0, b.slide - dt);
       } else {
         const ilen = Math.hypot(b.ix, b.iy);
@@ -941,10 +1074,10 @@ function tickRoom(room) {
     }
   }
 
-  const list = m.order.map((p) => m.bodies.get(p.id));
+  const list = m.bodies; // todos los CUERPOS (v1.3: la física no distingue dueños)
 
   if (!m.paused) {
-    /* ---- Colisión círculo-círculo entre jugadores (se empujan) ---- */
+    /* ---- Colisión círculo-círculo entre cuerpos (se empujan) ---- */
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
         const a = list[i];
@@ -1005,8 +1138,8 @@ function tickRoom(room) {
     const ball = m.ball;
 
     /* -- Dribble assist (v1.2 B, arreglado): aplica SOLO si TODAS las condiciones:
-       (a) pelota a ≤ PLAYER_R+BALL_R+8 del jugador,
-       (b) él es el jugador MÁS CERCANO a la pelota,
+       (a) pelota a ≤ PLAYER_R+BALL_R+8 del cuerpo,
+       (b) es el CUERPO MÁS CERCANO a la pelota (v1.3: entre cuerpos, no usuarios),
        (c) |vel jugador| > 40,
        (d) |vBall − vPlayer| < 140 (pelota "controlada", moviéndose con el jugador —
            NO al llegarle a una pelota quieta o que viene de frente: bug v1.1).
@@ -1096,7 +1229,7 @@ function tickRoom(room) {
             ball.vx -= (1 + BALL_PLAYER_E) * rvn * nx;
             ball.vy -= (1 + BALL_PLAYER_E) * rvn * ny;
           }
-          m.lastTouch = m.order[k].id;
+          m.lastTouch = list[k].id; // lastTouch = CUERPO (v1.3 A)
         }
       }
       clampBallSpeed(ball);
@@ -1122,6 +1255,17 @@ function tickRoom(room) {
           }
         }
       }
+    }
+  }
+
+  /* ---- Reloj de partido (v1.3 D, target=time): corre ÚNICAMENTE con la pelota en
+     juego (no durante GOAL_PAUSE — si este mismo tick hubo gol, m.paused ya es true
+     y el reloj no avanza). En GOL DE ORO ya no hay reloj. ---- */
+  if (room.status === "playing" && m.target === "time" && !m.golden && !m.paused) {
+    m.timeLeft -= dt;
+    if (m.timeLeft <= 0) {
+      m.timeLeft = 0;
+      timeUp(room); // líder único → gameover "time"; empate → golden
     }
   }
 
@@ -1190,14 +1334,18 @@ function recordTickSample(ms) {
   pruneTickSamples(now);
 }
 
-// GET /metrics → {rooms, playing, players, tickAvgMs, tickP95Ms, rssMB} (SPEC E.4).
+// GET /metrics → {rooms, playing, players, bodies, tickAvgMs, tickP95Ms, rssMB}
+// (SPEC E.4 + v1.3 E: players cuenta CONEXIONES (usuarios) y bodies los CUERPOS
+// en juego — en duo cada usuario aporta 2).
 function buildMetrics() {
   pruneTickSamples(Date.now());
   let playing = 0;
-  let players = 0;
+  let bodies = 0;
   for (const room of rooms.values()) {
-    if (room.status === "playing") playing++;
-    players += room.players.length;
+    if (room.status === "playing") {
+      playing++;
+      if (room.match) bodies += room.match.bodies.length;
+    }
   }
   let tickAvgMs = 0;
   let tickP95Ms = 0;
@@ -1211,7 +1359,8 @@ function buildMetrics() {
   return {
     rooms: rooms.size,
     playing,
-    players,
+    players: wss.clients.size, // conexiones WS = usuarios (v1.3 E)
+    bodies,
     tickAvgMs: Math.round(tickAvgMs * 1000) / 1000,
     tickP95Ms: Math.round(tickP95Ms * 1000) / 1000,
     rssMB: Math.round((process.memoryUsage().rss / (1024 * 1024)) * 10) / 10,
@@ -1237,8 +1386,10 @@ function handleCreate(ws, msg) {
     code: genRoomCode(),
     roomName,
     visibility,
-    mode: "ffa", // "ffa" | "1v1" | "2v2"
+    mode: "ffa", // "ffa" | "1v1" | "2v2" | "duo"
     stadium: "clasico", // "clasico" | "noche" | "playa" | "nieve"
+    target: "goals", // objetivo de partido (v1.3 D): "goals" | "time"
+    value: WIN_SCORE, // goles objetivo (default 3) o segundos según target
     players: [],
     nextPlayerNum: 1,
     status: "lobby", // "lobby" | "playing" | "gameover"
@@ -1283,6 +1434,8 @@ function buildRoomsList() {
       max: modeCapacity(room.mode),
       mode: room.mode,
       stadium: room.stadium,
+      target: room.target, // v1.3 D: las cards muestran el objetivo ("a 3 goles" / "5 min")
+      value: room.value,
     });
   }
   return list;
@@ -1400,6 +1553,26 @@ function handleSetTeam(ws, msg) {
   updateCountdown(room); // un 2v2 con todos ready puede habilitarse al balancear 2 y 2
 }
 
+// {type:"setMatch", target, value} — solo host, solo lobby (v1.3 D). Whitelist
+// EXACTA: goals → {1,3,5,10}; time → {120,180,300,600} segundos. Cambiarlo NO
+// resetea los readies (a diferencia de setMode). Inválido → error.
+function handleSetMatch(ws, msg) {
+  const room = ws.roomRef;
+  if (!room || room.status !== "lobby" || !ws.playerRef) return;
+  if (room.players[0] !== ws.playerRef) {
+    return sendError(ws, "Solo el host puede cambiar el objetivo");
+  }
+  const target = msg.target;
+  if (target !== "goals" && target !== "time") return sendError(ws, "Objetivo inválido");
+  const allowed = target === "goals" ? MATCH_GOALS_VALUES : MATCH_TIME_VALUES;
+  if (!allowed.includes(msg.value)) return sendError(ws, "Objetivo inválido");
+  if (room.target === target && room.value === msg.value) return;
+  room.target = target;
+  room.value = msg.value;
+  broadcastLobby(room); // los readies quedan como estaban (SPEC v1.3 D)
+  notifyRoomsChanged(); // target/value se muestran en las cards de salas (v1.3 D)
+}
+
 // rematch (host, tras gameover): vuelve AL LOBBY con readies reseteados (v1.1);
 // el partido arranca de nuevo solo por readies (auto-arranque).
 function handleRematch(ws) {
@@ -1413,28 +1586,12 @@ function handleRematch(ws) {
   notifyRoomsChanged(); // gameover → lobby: la sala vuelve a la lista de públicas (v1.2 C)
 }
 
-function handleInput(ws, msg) {
-  const room = ws.roomRef;
-  if (!room || room.status !== "playing" || !room.match || !ws.playerRef) return;
-  const player = ws.playerRef;
-  const b = room.match.bodies.get(player.id);
-  if (!b) return;
-
-  // seq (v1.2 A): entero incremental por conexión (arranca en 1). Ignorar seq no
-  // numérico y seq ≤ lastSeq (input viejo/reordenado). Compat clientes sin seq:
-  // se aplica igual con seq = lastSeq + 1 (SPEC v1.2, notas de compatibilidad).
-  if (msg.seq === undefined) {
-    player.lastSeq += 1;
-  } else {
-    if (typeof msg.seq !== "number" || !Number.isFinite(msg.seq)) return;
-    const seq = Math.floor(msg.seq);
-    if (seq <= player.lastSeq) return;
-    player.lastSeq = seq;
-  }
-
+// Aplica un paquete de input (los campos planos o el objeto `b` de duo, con las
+// MISMAS validaciones/clamps — v1.3 B) a UN cuerpo.
+function applyBodyInput(b, src) {
   // Clampear cada componente a [-1, 1] y normalizar si |v| > 1 (server-side, SPEC).
-  let mx = clamp(num(msg.mx), -1, 1);
-  let my = clamp(num(msg.my), -1, 1);
+  let mx = clamp(num(src.mx), -1, 1);
+  let my = clamp(num(src.my), -1, 1);
   const len = Math.hypot(mx, my);
   if (len > 1) {
     mx /= len;
@@ -1452,8 +1609,42 @@ function handleInput(ws, msg) {
   }
 
   // kick/tackle edge-trigger: quedan pendientes hasta el próximo tick, que los consume.
-  if (msg.kick === true) b.wantKick = true;
-  if (msg.tackle === true) b.wantTackle = true;
+  if (src.kick === true) b.wantKick = true;
+  if (src.tackle === true) b.wantTackle = true;
+}
+
+function handleInput(ws, msg) {
+  const room = ws.roomRef;
+  if (!room || room.status !== "playing" || !room.match || !ws.playerRef) return;
+  const player = ws.playerRef;
+  const userBodies = room.match.bodiesByUser.get(player.id);
+  if (!userBodies) return;
+
+  // seq (v1.2 A): entero incremental por conexión (arranca en 1). Ignorar seq no
+  // numérico y seq ≤ lastSeq (input viejo/reordenado). Compat clientes sin seq:
+  // se aplica igual con seq = lastSeq + 1 (SPEC v1.2, notas de compatibilidad).
+  // v1.3 B: UN solo seq por mensaje cubre AMBOS cuerpos del usuario.
+  if (msg.seq === undefined) {
+    player.lastSeq += 1;
+  } else {
+    if (typeof msg.seq !== "number" || !Number.isFinite(msg.seq)) return;
+    const seq = Math.floor(msg.seq);
+    if (seq <= player.lastSeq) return;
+    player.lastSeq = seq;
+  }
+
+  // Campos planos → cuerpo slot 0. En duo, el objeto `b` (opcional, mismos clamps)
+  // controla el slot 1; SIN `b` el cuerpo B queda con movimiento 0 (quieto) y sin
+  // acciones (v1.3 B). En modos no-duo el server IGNORA `b` (un solo cuerpo).
+  applyBodyInput(userBodies[0], msg);
+  if (userBodies.length === DUO_BODIES) {
+    if (msg.b && typeof msg.b === "object") {
+      applyBodyInput(userBodies[1], msg.b);
+    } else {
+      userBodies[1].ix = 0;
+      userBodies[1].iy = 0;
+    }
+  }
 }
 
 function handleMessage(ws, msg) {
@@ -1488,6 +1679,9 @@ function handleMessage(ws, msg) {
       break;
     case "setTeam":
       handleSetTeam(ws, msg);
+      break;
+    case "setMatch":
+      handleSetMatch(ws, msg);
       break;
     case "input":
       handleInput(ws, msg);

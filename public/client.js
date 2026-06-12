@@ -40,6 +40,29 @@
  *                    1:1 con el sintético, no-solapado (solo gol/campeón
  *                    pisan), fallback speechSynthesis POR EVENTO,
  *                    #relator-pack-label con el nombre del pack activo
+ *
+ * v1.3 — USUARIOS vs CUERPOS + OBJETIVO DE PARTIDO (SPEC v1.3 A/B/C/D):
+ *   duo            — cada usuario controla DOS cuerpos (slot 0 = A, 1 = B);
+ *                    start trae {id,name,country,team,owner,slot} por cuerpo
+ *   predicción ×2  — la MISMA sim local v1.2 generalizada a N cuerpos propios
+ *                    (selfPred); pendingInputs = {seq, a:{mx,my}, b:{mx,my}, dt};
+ *                    un solo seq por mensaje, iq compartido, corr por cuerpo
+ *   input duo      — {type:"input", seq, mx,my,kick,tackle, b:{...}} inmediato
+ *                    al cambiar (cap 60/s) + keepalive 20 Hz; táctil: DOS zonas
+ *                    (mitades) con joystick dinámico independiente por zona,
+ *                    TAP (<220 ms, <12 px) = patear, DOBLE TAP (≤300 ms) =
+ *                    barrer, botones ⚽/🦵 ocultos solo en duo; teclado: A =
+ *                    WASD+F/G, B = flechas+L/K (+ hint #duo-keys-hint 3 s)
+ *   setMatch       — #match-target-select / #match-value-select (whitelists
+ *                    goals 1/3/5/10, time 120/180/300/600), chip "a N goles" /
+ *                    "N min" en cards de salas y lobby
+ *   timer          — #match-clock mm:ss con state.tl (solo target=time);
+ *                    {type:"golden"} ⇒ overlay 2 s + reloj "GOL DE ORO"
+ *                    pulsante; gameover.reason ("golden"/"time") como
+ *                    subtítulo del campeón
+ *   identidad      — halo dorado en el cuerpo A propio, plateado + "②" en el
+ *                    B; relator/feedback/scoreboard hablan del USUARIO dueño
+ *   En modos NO-duo todo queda exactamente como v1.2.
  * ============================================================ */
 
 /* ================= Constantes compartidas (SPEC, = server.js) ================= */
@@ -56,6 +79,7 @@ const MAX_SPEED = 230;      // u/s velocidad máxima del jugador
 const FRICTION = 7.5;       // damping exponencial sin input (v1.2: antes 6)
 const SLIDE_SPEED = 320;    // velocidad fija durante la barrida (v1.1)
 const KICK_RANGE = 44;      // alcance de la patada (v1.2: antes 36) — feedback local
+const KICK_COOLDOWN = 0.35; // s (SPEC) — cooldown LOCAL del feedback de patada
 const TACKLE_COOLDOWN = 1.6; // s — solo para feedback visual del botón táctil
 
 /* ======================= Constantes propias del cliente ======================= */
@@ -75,8 +99,17 @@ const SNAP_GAP_CAP = 400;   // ms: un gap outlier (pestaña oculta) no rompe la 
 const PENDING_MAX = 240;    // tope de pendingInputs (~4 s) si el server deja de ackear
 const PROFILE_KEY = "poligol.profile";   // localStorage: { name, country }
 const SETTINGS_KEY = "poligol.settings"; // localStorage: { sound, relator, fx, vibration, names }
+// v1.3 (SPEC C) — gestos táctiles del modo duo
+const TAP_MS = 220;          // tap: duración máxima
+const TAP_MOVE_PX = 12;      // tap: desplazamiento máximo (y umbral de arrastre en duo)
+const DOUBLE_TAP_MS = 300;   // segundo tap ≤ 300 ms del primero ⇒ barrida
+// v1.3 (SPEC D) — objetivo de partido configurable (whitelists del SPEC)
+const MATCH_GOALS_VALUES = [1, 3, 5, 10];        // target = "goals"
+const MATCH_TIME_VALUES = [120, 180, 300, 600];  // target = "time" (segundos)
+const MATCH_GOALS_DEFAULT = 3;                   // default del SPEC
+const MATCH_TIME_DEFAULT = 180;                  // default local al pasar a "time"
 
-const MODE_LABELS = { ffa: "Todos contra todos", "1v1": "1 vs 1", "2v2": "2 vs 2" };
+const MODE_LABELS = { ffa: "Todos contra todos", "1v1": "1 vs 1", "2v2": "2 vs 2", duo: "Dúo" };
 const STADIUM_LABELS = { clasico: "Clásico", noche: "Noche", playa: "Playa", nieve: "Nieve" };
 
 /* ================================ Selecciones ================================ */
@@ -159,6 +192,48 @@ const btnReady = $("btn-ready");                   // v1.1
 const btnWhatsapp = $("btn-whatsapp");             // v1.1 (<a>)
 const btnCopyLink = $("btn-copy-link");            // v1.1
 const lobbyCountdown = $("lobby-countdown");       // v1.1
+// v1.3 (SPEC D): selects del objetivo de partido. Si el HTML aún no los trae,
+// se crean dentro de .lobby-config (mismo markup que modo/estadio) para que el
+// host pueda configurarlo igual; si existen en el HTML se usan tal cual.
+let matchTargetSelect = $("match-target-select"); // Goles | Tiempo
+let matchValueSelect = $("match-value-select");   // values según target (whitelists)
+(function ensureMatchSelects() {
+  const cfgBox = document.querySelector(".lobby-config");
+  if (!cfgBox) return;
+  if (!matchTargetSelect) {
+    const field = document.createElement("div");
+    field.className = "config-field";
+    const lab = document.createElement("label");
+    lab.className = "field-label";
+    lab.htmlFor = "match-target-select";
+    lab.textContent = "Objetivo";
+    matchTargetSelect = document.createElement("select");
+    matchTargetSelect.id = "match-target-select";
+    matchTargetSelect.className = "select";
+    const og = document.createElement("option");
+    og.value = "goals";
+    og.textContent = "🥅 Goles";
+    const ot = document.createElement("option");
+    ot.value = "time";
+    ot.textContent = "⏱️ Tiempo";
+    matchTargetSelect.append(og, ot);
+    field.append(lab, matchTargetSelect);
+    cfgBox.appendChild(field);
+  }
+  if (!matchValueSelect) {
+    const field = document.createElement("div");
+    field.className = "config-field";
+    const lab = document.createElement("label");
+    lab.className = "field-label";
+    lab.htmlFor = "match-value-select";
+    lab.textContent = "Hasta";
+    matchValueSelect = document.createElement("select");
+    matchValueSelect.id = "match-value-select";
+    matchValueSelect.className = "select";
+    field.append(lab, matchValueSelect);
+    cfgBox.appendChild(field);
+  }
+})();
 // Juego
 const canvas = $("game-canvas");
 const scoreboardEl = $("scoreboard");
@@ -328,21 +403,28 @@ let scoreItems = [];       // team index → {root, valEl, value}
 let overlayTimers = [];
 let copiedTimer = 0;
 let inputTimer = 0;        // keepalive de input a 20 Hz (v1.2)
-let tackleCdUntil = 0;
-let kickCdUntil = 0;       // cooldown LOCAL de kick (el kc del snapshot llega tarde ~interpDelay+RTT/2)
+// v1.3: cooldowns LOCALES de feedback POR CUERPO propio (índice = slot; en
+// modos no-duo solo se usa el slot 0, exactamente como los escalares v1.2).
+let tackleCdUntil = [0, 0];
+let kickCdUntil = [0, 0];  // el kc del snapshot llega tarde ~interpDelay+RTT/2
 let lobbyCountdownTimer = 0;
 
-// Netcode v1.2 (SPEC A) — predicción del propio jugador + reconciliación.
+// Netcode v1.2 (SPEC A) — predicción + reconciliación. v1.3 (SPEC B): se
+// generaliza a N cuerpos propios (en duo, 2) con la MISMA simulación local.
 let inputSeq = 0;          // seq incremental por conexión (el primer input manda 1)
-let lastSentMx = 0;        // último vector de movimiento enviado (detección de cambio)
-let lastSentMy = 0;
+let lastSentA = { mx: 0, my: 0 }; // último movimiento enviado del cuerpo A (detección de cambio)
+let lastSentB = { mx: 0, my: 0 }; // ídem cuerpo B (solo relevante en duo)
 let lastInputSendT = -1e9; // performance.now() del último input enviado (cap 60/s)
-let queuedKick = false;    // acción latcheada si el cap pospuso el envío
-let queuedTackle = false;
-let pendingInputs = [];    // [{seq, mx, my, dt}] aún sin ack del server
-let pred = null;           // estado predicho del PROPIO jugador {x,y,vx,vy,fx,fy,stun,slide,sdx,sdy}
-let corrX = 0;             // offset de corrección: render propio = pred + corr
-let corrY = 0;             //   (decae a 0 en ~120 ms; snap directo si > CORR_SNAP)
+// Acciones latcheadas si el cap pospuso el envío (índice = slot del cuerpo).
+const queuedActs = [
+  { kick: false, tackle: false },
+  { kick: false, tackle: false },
+];
+let pendingInputs = [];    // [{seq, a:{mx,my}, b:{mx,my}, dt}] aún sin ack del server
+// Estado predicho POR CUERPO PROPIO (v1.3): {id, slot, pred, corrX, corrY};
+// pred = {x,y,vx,vy,fx,fy,stun,slide,sdx,sdy}; render propio = pred + corr
+// (el offset decae a 0 en ~120 ms; snap directo si > CORR_SNAP).
+let selfPred = [];
 let lastPaused = false;    // último paused del server (congela la predicción)
 let snapArrivals = [];     // llegadas de snapshots (ventana ~20) → delay adaptativo
 let interpDelay = 100;     // ms: clamp(snapInterval*1.5 + jitter, 50, 160) (SPEC A)
@@ -367,9 +449,55 @@ let shakeUntil = 0;            // screen-shake de gol (4 px, 200 ms)
 let lastKickT = -1e9;          // momento de la última patada (squash de pelota)
 let lastBounceMs = -1e9;       // rate-limit del "doink" de rebote
 
-const keys = new Set();
-// Joystick DINÁMICO: ox,oy = punto de pantalla donde apoyó el dedo.
-const joy = { active: false, id: null, ox: 0, oy: 0, mx: 0, my: 0 };
+const keysDown = new Set(); // e.code crudos (v1.3: WASD y flechas se separan en duo)
+// Joysticks DINÁMICOS: ox,oy = punto de pantalla donde apoyó el dedo. v1.3:
+// uno por ZONA (índice 0 = mitad izquierda / cuerpo A, 1 = derecha / cuerpo B;
+// en modos no-duo solo existe la zona 0, igual que v1.2). moved/startT/lastTapT
+// alimentan los gestos TAP / DOBLE TAP del modo duo.
+function makeJoy() {
+  return {
+    active: false, id: null, ox: 0, oy: 0, mx: 0, my: 0,
+    moved: false, startT: 0, lastTapT: -1e9,
+  };
+}
+const joys = [makeJoy(), makeJoy()];
+
+// v1.3: helpers de modo duo y cuerpos propios.
+function isDuo() {
+  return !!(match && match.mode === "duo");
+}
+
+function selfBody(slot) {
+  for (const sb of selfPred) if (sb.slot === slot) return sb;
+  return null;
+}
+
+// Nombre del USUARIO dueño de un cuerpo (v1.3: relator, overlays y scoreboard
+// hablan del usuario, no del cuerpo). En no-duo coincide con el nombre v1.2.
+function bodyUserName(body) {
+  if (!body) return "";
+  if (match && match.ownerNames && match.ownerNames.has(body.owner)) {
+    return match.ownerNames.get(body.owner);
+  }
+  return body.name || "";
+}
+
+// Whitelists del objetivo de partido (SPEC v1.3 D).
+function matchValueOk(target, v) {
+  const list = target === "time" ? MATCH_TIME_VALUES : MATCH_GOALS_VALUES;
+  return typeof v === "number" && list.indexOf(v) !== -1;
+}
+
+function matchDefaultValue(target) {
+  return target === "time" ? MATCH_TIME_DEFAULT : MATCH_GOALS_DEFAULT;
+}
+
+// Texto del chip de objetivo: "a 3 goles" / "a 1 gol" / "5 min" (SPEC v1.3 D).
+function matchChipLabel(target, value) {
+  const v = matchValueOk(target, value) ? value : matchDefaultValue(target);
+  if (target === "time") return Math.round(v / 60) + " min";
+  return "a " + v + (v === 1 ? " gol" : " goles");
+}
 
 const IS_TOUCH =
   (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) ||
@@ -492,6 +620,9 @@ function handleMessage(msg) {
     case "kickoff":
       handleKickoff();
       break;
+    case "golden":
+      handleGolden();
+      break;
     case "gameover":
       handleGameover(msg);
       break;
@@ -595,6 +726,10 @@ function goHome(sendLeave) {
   feetState.clear();
   relatorStop();
   resetPrediction();
+  selfPred = [];
+  hideMatchClock();          // v1.3
+  hideDuoKeysHint();         // v1.3
+  updateTouchButtonsVisibility(false); // v1.3: ⚽/🦵 vuelven fuera de duo
   snapArrivals = [];
   interpDelay = 100;
   lastPaused = false;
@@ -752,6 +887,7 @@ function handleRooms(msg) {
   const key = JSON.stringify(
     list.map((r) => [
       r.code, r.roomName, r.hostName, r.count, r.max, r.mode, r.stadium,
+      r.target, r.value, // v1.3: el chip de objetivo también invalida el cache
       r.code === roomCode, // el badge "Tu sala" también invalida el cache de render
     ])
   );
@@ -802,6 +938,13 @@ function renderRooms(list) {
     chipStadium.className = "room-chip";
     chipStadium.textContent = STADIUM_LABELS[r.stadium] || String(r.stadium || "");
     meta.append(chipMode, chipCount, chipStadium);
+    // v1.3 (SPEC D): chip de objetivo de partido ("a 3 goles" / "5 min").
+    if (r.target === "goals" || r.target === "time") {
+      const chipMatch = document.createElement("span");
+      chipMatch.className = "room-chip room-chip-match";
+      chipMatch.textContent = matchChipLabel(r.target, r.value);
+      meta.appendChild(chipMatch);
+    }
     info.appendChild(meta);
 
     const joinBtn = document.createElement("button");
@@ -840,16 +983,24 @@ function handleLobby(msg) {
     feetState.clear();
     relatorStop();
     resetPrediction();
+    selfPred = [];
+    hideMatchClock();          // v1.3
+    hideDuoKeysHint();         // v1.3
+    updateTouchButtonsVisibility(false); // v1.3
     lastPaused = false;
     ended = false;
   }
   phase = "lobby";
+  // v1.3 (SPEC D): el lobby gana target/value (defaults goals/3 si faltan).
+  const target = msg.target === "time" ? "time" : "goals";
   lobby = {
     code: typeof msg.code === "string" ? msg.code : roomCode,
     roomName: typeof msg.roomName === "string" ? msg.roomName : "",
     visibility: msg.visibility === "public" ? "public" : "private",
     mode: typeof msg.mode === "string" ? msg.mode : "ffa",
     stadium: typeof msg.stadium === "string" ? msg.stadium : "clasico",
+    target,
+    value: matchValueOk(target, msg.value) ? msg.value : matchDefaultValue(target),
     players: Array.isArray(msg.players) ? msg.players : [],
   };
   roomCode = lobby.code;
@@ -910,6 +1061,17 @@ function renderLobby(notice) {
     stadiumSelect.value = lobby.stadium;
     stadiumSelect.disabled = !meHost;
   }
+  // v1.3 (SPEC D): selects de objetivo — host habilitado, no-host solo lectura;
+  // las opciones de value se repueblan según el target (whitelists del SPEC).
+  if (matchTargetSelect) {
+    matchTargetSelect.value = lobby.target;
+    matchTargetSelect.disabled = !meHost;
+  }
+  if (matchValueSelect) {
+    populateMatchValues(lobby.target, lobby.value);
+    matchValueSelect.disabled = !meHost;
+  }
+  renderLobbyMatchChip(); // chip "a N goles" / "N min" también en el lobby
 
   renderTeamsPanel();
 
@@ -1005,6 +1167,67 @@ on(modeSelect, "change", () => {
 on(stadiumSelect, "change", () => {
   if (phase !== "lobby" || hostId !== myId) return;
   wsSend({ type: "setStadium", stadium: stadiumSelect.value });
+});
+
+/* -------------------- Objetivo de partido (v1.3, SPEC D) -------------------- */
+// Repuebla #match-value-select según el target (goles: 1/3/5/10 — tiempo:
+// 2/3/5/10 min) y selecciona `selected` (o el default si no está en la lista).
+function populateMatchValues(target, selected) {
+  if (!matchValueSelect) return;
+  const vals = target === "time" ? MATCH_TIME_VALUES : MATCH_GOALS_VALUES;
+  let same = matchValueSelect.options.length === vals.length;
+  if (same) {
+    for (let i = 0; i < vals.length; i++) {
+      if (matchValueSelect.options[i].value !== String(vals[i])) {
+        same = false;
+        break;
+      }
+    }
+  }
+  if (!same) {
+    matchValueSelect.textContent = "";
+    for (const v of vals) {
+      const opt = document.createElement("option");
+      opt.value = String(v);
+      opt.textContent =
+        target === "time" ? Math.round(v / 60) + " min" : v === 1 ? "1 gol" : v + " goles";
+      matchValueSelect.appendChild(opt);
+    }
+  }
+  matchValueSelect.value = String(
+    matchValueOk(target, selected) ? selected : matchDefaultValue(target)
+  );
+}
+
+// Chip de objetivo en el lobby, junto al badge de visibilidad (se crea una vez;
+// reusa el estilo .visibility-badge para no exigir CSS nuevo).
+function renderLobbyMatchChip() {
+  if (!lobby || !lobbyVisibilityBadge || !lobbyVisibilityBadge.parentNode) return;
+  let chip = $("lobby-match-chip");
+  if (!chip) {
+    chip = document.createElement("span");
+    chip.id = "lobby-match-chip";
+    chip.className = "visibility-badge match-chip";
+    lobbyVisibilityBadge.parentNode.insertBefore(chip, lobbyVisibilityBadge.nextSibling);
+  }
+  chip.textContent =
+    (lobby.target === "time" ? "⏱️ " : "🥅 ") + matchChipLabel(lobby.target, lobby.value);
+}
+
+on(matchTargetSelect, "change", () => {
+  if (phase !== "lobby" || hostId !== myId) return;
+  const target = matchTargetSelect.value === "time" ? "time" : "goals";
+  const value = matchDefaultValue(target); // al cambiar de target se propone el default
+  populateMatchValues(target, value);      // feedback inmediato; el lobby confirma
+  wsSend({ type: "setMatch", target, value });
+});
+
+on(matchValueSelect, "change", () => {
+  if (phase !== "lobby" || hostId !== myId) return;
+  const target = matchTargetSelect && matchTargetSelect.value === "time" ? "time" : "goals";
+  const value = parseInt(matchValueSelect.value, 10);
+  if (!matchValueOk(target, value)) return; // whitelist del SPEC
+  wsSend({ type: "setMatch", target, value });
 });
 
 on(btnLeave, "click", () => goHome(true));
@@ -1173,10 +1396,12 @@ function buildFieldPath(verts) {
 }
 
 /* ================================== Partido ================================== */
-// Etiqueta humana de un equipo: nombres de sus integrantes ("Leo", "Gonza y Leo").
+// Etiqueta humana de un equipo: nombres de sus USUARIOS ("Leo", "Gonza y Leo").
+// v1.3: en duo el equipo tiene 2 cuerpos del MISMO usuario ⇒ un solo nombre.
 function teamLabel(team) {
-  if (!team || team.members.length === 0) return "Equipo";
-  return team.members.map((m) => m.name).join(" y ");
+  const list = team && team.users && team.users.length ? team.users : team ? team.members : null;
+  if (!list || list.length === 0) return "Equipo";
+  return list.map((m) => bodyUserName(m)).join(" y ");
 }
 
 function handleStart(msg) {
@@ -1187,6 +1412,9 @@ function handleStart(msg) {
   if (n < 2) return;
   const geo = buildGeometry(n);
 
+  // v1.3 (SPEC A): cada entrada de players es un CUERPO {id,name,country,team,
+  // owner,slot}. En modos no-duo el server manda slot 0 y owner = el usuario
+  // (uniforme); los defaults cubren un server viejo sin esos campos.
   const players = cfg.players.map((p) => {
     const info = countryInfo(p.country);
     return {
@@ -1194,6 +1422,8 @@ function handleStart(msg) {
       name: p.name,
       country: p.country,
       team: typeof p.team === "number" ? p.team : 0,
+      owner: typeof p.owner === "string" ? p.owner : p.id,
+      slot: p.slot === 1 ? 1 : 0,
       c1: info.c1,
       c2: info.c2,
       flag: flagOf(p.country),
@@ -1201,35 +1431,74 @@ function handleStart(msg) {
   });
   const byId = new Map(players.map((p) => [p.id, p]));
 
+  // USUARIOS: nombre por owner (el del cuerpo slot 0 manda) para relator/labels.
+  const ownerNames = new Map();
+  for (const p of players) {
+    if (!ownerNames.has(p.owner) || p.slot === 0) ownerNames.set(p.owner, p.name);
+  }
+
   const teams = cfg.teams.map((t, idx) => {
     const members = (Array.isArray(t.players) ? t.players : [])
       .map((id) => byId.get(id))
       .filter(Boolean);
+    // v1.3: `users` = un cuerpo representante por USUARIO (en duo, los 2
+    // cuerpos comparten owner ⇒ una sola bandera/nombre en pills y arcos).
+    const users = [];
+    const seen = new Set();
+    for (const m of members) {
+      if (seen.has(m.owner)) continue;
+      seen.add(m.owner);
+      users.push(m);
+    }
     return {
       index: idx,
       members,
+      users,
       c1: members[0] ? members[0].c1 : "#9fb0c8",
       c2: members[0] ? members[0].c2 : "#ffffff",
-      flags: members.map((m) => m.flag).join(""),
+      flags: users.map((m) => m.flag).join(""),
     };
   });
 
-  const me = byId.get(myId);
+  // Cuerpos PROPIOS (v1.3): por owner; fallback por id para servers sin owner.
+  const myBodies = players.filter((p) => p.owner === myId);
+  if (!myBodies.length && byId.has(myId)) myBodies.push(byId.get(myId));
+  myBodies.sort((a, b) => a.slot - b.slot);
+
+  const mode = typeof cfg.mode === "string" ? cfg.mode : "ffa";
   const stadium = typeof cfg.stadium === "string" ? cfg.stadium : "clasico";
+  // Objetivo (SPEC D): del config si viniera; si no, lo último visto en lobby.
+  let target = cfg.target === "time" || cfg.target === "goals" ? cfg.target : null;
+  let value = target !== null && matchValueOk(target, cfg.value) ? cfg.value : null;
+  if (target === null) target = lobby && lobby.target === "time" ? "time" : "goals";
+  if (value === null) {
+    value =
+      lobby && lobby.target === target && matchValueOk(target, lobby.value)
+        ? lobby.value
+        : matchDefaultValue(target);
+  }
   match = {
-    mode: typeof cfg.mode === "string" ? cfg.mode : "ffa",
+    mode,
     stadium,
     n,
     players,
     byId,
     teams,
-    myTeam: me ? me.team : null,
+    myTeam: myBodies[0] ? myBodies[0].team : null,
+    myBodyIds: new Set(myBodies.map((b) => b.id)), // v1.3: ids de cuerpos propios
+    ownerNames,
+    target,        // v1.3 (D): "goals" | "time"
+    value,         // v1.3 (D): whitelisted
+    golden: false, // v1.3 (D): true tras {type:"golden"} (GOL DE ORO)
     walls: geo.walls,
     verts: geo.verts,
     bounds: geo.bounds,
     fieldPath: buildFieldPath(geo.verts),
     phys: clientStadiumPhys(stadium), // accel/friction efectivas (= server, v1.2)
   };
+  // Predicción ×N (SPEC B): una entrada por cuerpo propio; el primer state la
+  // inicializa desde el estado autoritativo (pred null hasta entonces).
+  selfPred = myBodies.map((b) => ({ id: b.id, slot: b.slot, pred: null, corrX: 0, corrY: 0 }));
   snaps = [];
   resetPrediction();
   snapArrivals = [];
@@ -1241,8 +1510,8 @@ function handleStart(msg) {
   confettiRainUntil = 0;
   ballSpin = 0;
   ended = false;
-  tackleCdUntil = 0;
-  kickCdUntil = 0;
+  tackleCdUntil = [0, 0];
+  kickCdUntil = [0, 0];
   goalStreak = { team: null, count: 0 };
   feetState.clear();
   dustFx = [];
@@ -1257,6 +1526,12 @@ function handleStart(msg) {
   showScreen("game");
   enterGameDisplay();
   startInputLoop();
+  // v1.3: en duo táctil las zonas cubren toda la pantalla ⇒ sin botones ⚽/🦵;
+  // reloj visible solo con target=time; hint de teclas 3 s en duo por teclado.
+  updateTouchButtonsVisibility(isDuo());
+  updateMatchClock(match.target === "time" ? match.value : null);
+  if (isDuo() && !IS_TOUCH) showDuoKeysHint();
+  else hideDuoKeysHint();
 
   // La cuenta de 3 ya corrió en el lobby (starting): acá solo el pitazo inicial.
   const d = document.createElement("div");
@@ -1329,8 +1604,10 @@ function handleState(msg) {
     for (const [id, p] of pm) {
       const q = prev.players.get(id);
       if (!q) continue;
+      // v1.3: "propio" ahora son TODOS los cuerpos del usuario (en duo, 2).
+      const own = match.myBodyIds ? match.myBodyIds.has(id) : id === myId;
       if (p.kc > q.kc + 0.05) {
-        if (id !== myId) {
+        if (!own) {
           ringFx.push({ x: p.x, y: p.y, t });
           sfxKick();
         }
@@ -1340,12 +1617,12 @@ function handleState(msg) {
         }
       }
       const qSlide = q.slide || 0;
-      if ((p.slide || 0) > qSlide + 0.05 && id !== myId) sfxTackle(); // arranque del slide
+      if ((p.slide || 0) > qSlide + 0.05 && !own) sfxTackle(); // arranque del slide
       if (p.stun > q.stun + 0.05) {
-        // Barrida que conecta: vibración si me la dieron a mí + relator.
-        if (id === myId) vibrate(40);
+        // Barrida que conecta: vibración si se la dieron a un cuerpo mío + relator.
+        if (own) vibrate(40);
         const victim = match.byId.get(id);
-        // El que barre: el jugador en slide más cercano a la víctima.
+        // El que barre: el cuerpo en slide más cercano a la víctima.
         let tacklerId = null;
         let bestD = Infinity;
         for (const [oid, op] of pm) {
@@ -1357,9 +1634,10 @@ function handleState(msg) {
           }
         }
         const tackler = tacklerId ? match.byId.get(tacklerId) : null;
+        // v1.3: el relator nombra al USUARIO dueño de cada cuerpo.
         commentator("tackle", {
-          name: tackler ? tackler.name : "",
-          rival: victim ? victim.name : "",
+          name: tackler ? bodyUserName(tackler) : "",
+          rival: victim ? bodyUserName(victim) : "",
         });
       }
     }
@@ -1376,11 +1654,17 @@ function handleState(msg) {
   if (snaps.length > 40) snaps.shift();
   if (Array.isArray(msg.scores)) updateScores(msg.scores);
 
-  const me = pm.get(myId);
-  if (me) {
-    reconcileSelf(me, !!msg.paused); // predicción + reconciliación (SPEC A)
-    if (btnKick) btnKick.classList.toggle("cooldown", me.kc > 0.02);
+  // v1.3 (SPEC D): reloj mm:ss con state.tl (presente SOLO en target=time;
+  // en GOL DE ORO tl se omite y el reloj queda en "GOL DE ORO" pulsante).
+  if (match.golden || typeof msg.tl === "number") {
+    updateMatchClock(typeof msg.tl === "number" && isFinite(msg.tl) ? msg.tl : null);
   }
+
+  // Predicción + reconciliación de TODOS los cuerpos propios (SPEC A / v1.3 B).
+  reconcileSelf(pm, !!msg.paused);
+  const sbA = selfBody(0);
+  const meA = sbA ? pm.get(sbA.id) : null;
+  if (btnKick && meA) btnKick.classList.toggle("cooldown", meA.kc > 0.02);
 }
 
 function handleGoal(msg) {
@@ -1390,6 +1674,8 @@ function handleGoal(msg) {
   overlayEl.textContent = "";
 
   const scorer = msg.scorerId ? match.byId.get(msg.scorerId) : null;
+  // v1.3: el gol se anuncia con el nombre del USUARIO dueño del cuerpo.
+  const scorerName = scorer ? bodyUserName(scorer) : "";
   const scorerTeam =
     typeof msg.scorerTeam === "number" ? match.teams[msg.scorerTeam] || null : null;
   const conceded =
@@ -1402,7 +1688,7 @@ function handleGoal(msg) {
     if (scorer) goalText.style.color = scorer.c1;
     else if (conceded) goalText.style.color = conceded.c1;
   } else if (scorer) {
-    goalText.textContent = "¡GOL DE " + scorer.name.toUpperCase() + "!";
+    goalText.textContent = "¡GOL DE " + scorerName.toUpperCase() + "!";
     goalText.style.color = scorer.c1;
   } else if (scorerTeam) {
     goalText.textContent = "¡GOL DE " + teamLabel(scorerTeam).toUpperCase() + "!";
@@ -1416,7 +1702,7 @@ function handleGoal(msg) {
   sub.className = "overlay-sub";
   if (msg.ownGoal) {
     sub.textContent = scorer
-      ? scorer.name + " la mandó contra su propio arco"
+      ? scorerName + " la mandó contra su propio arco"
       : conceded
         ? teamLabel(conceded) + " la mandó contra su propio arco"
         : "";
@@ -1452,12 +1738,19 @@ function handleGoal(msg) {
     goalStreak = { team: null, count: 0 };
   }
   commentator(msg.ownGoal ? "owngoal" : "goal", {
-    name: scorer ? scorer.name : scorerTeam ? teamLabel(scorerTeam) : conceded ? teamLabel(conceded) : "",
+    name: scorer ? scorerName : scorerTeam ? teamLabel(scorerTeam) : conceded ? teamLabel(conceded) : "",
     streak: goalStreak.count,
   });
 
-  // Si ningún equipo llegó a WIN_SCORE viene un kickoff: cuenta regresiva en la pausa.
-  const someoneWon = Array.isArray(msg.scores) && msg.scores.some((s) => s >= WIN_SCORE);
+  // Si el partido no terminó viene un kickoff: cuenta regresiva en la pausa.
+  // v1.3 (D): con target=goals gana el primero en llegar a match.value (config,
+  // default WIN_SCORE); con target=time un gol solo termina en GOL DE ORO.
+  const goalLimit = typeof match.value === "number" ? match.value : WIN_SCORE;
+  const someoneWon =
+    match.golden ||
+    (match.target !== "time" &&
+      Array.isArray(msg.scores) &&
+      msg.scores.some((s) => s >= goalLimit));
   if (!someoneWon) {
     overlayTimers.push(
       setTimeout(() => {
@@ -1479,12 +1772,41 @@ function handleKickoff() {
   overlayEl.textContent = "";
 }
 
+// v1.3 (SPEC D): tiempo agotado con empate en la cima ⇒ GOL DE ORO. Announce
+// de 2 s en el #overlay existente + #match-clock pasa a "GOL DE ORO" pulsante.
+function handleGolden() {
+  if (!match || phase !== "game") return;
+  match.golden = true;
+  updateMatchClock(null); // el reloj muestra "GOL DE ORO" (tl ya no viaja)
+  clearOverlayTimers();
+  overlayEl.textContent = "";
+  const d = document.createElement("div");
+  d.className = "goal-text golden-goal";
+  d.style.color = "#f5c542";
+  d.textContent = "¡GOL DE ORO!";
+  const sub = document.createElement("div");
+  sub.className = "overlay-sub";
+  sub.textContent = "El próximo gol gana el partido";
+  overlayEl.append(d, sub);
+  overlayTimers.push(
+    setTimeout(() => {
+      overlayEl.textContent = "";
+    }, 2000)
+  );
+  sfxCountdown(1); // beep de atención
+}
+
 function handleGameover(msg) {
   if (Array.isArray(msg.scores)) updateScores(msg.scores);
   ended = true;
   stopInputLoop();
   clearOverlayTimers();
   overlayEl.textContent = "";
+
+  // v1.3: el reloj/golden se apagan al terminar (el overlay del campeón manda).
+  if (match) match.golden = false;
+  hideMatchClock();
+  hideDuoKeysHint();
 
   const wt =
     match && typeof msg.winnerTeam === "number" ? match.teams[msg.winnerTeam] || null : null;
@@ -1498,9 +1820,18 @@ function handleGameover(msg) {
   name.textContent = wt ? teamLabel(wt) : "Campeón";
   const sub = document.createElement("div");
   sub.className = "winner-sub";
-  sub.textContent =
-    wt && wt.members.length > 1 ? "¡Campeones del PoliGol!" : "¡Campeón del PoliGol!";
+  // v1.3: "Campeones" si el equipo tiene más de un USUARIO (no cuerpos: en duo
+  // un usuario con 2 cuerpos sigue siendo UN campeón).
+  const winnerUsers = wt ? (wt.users && wt.users.length ? wt.users.length : wt.members.length) : 1;
+  sub.textContent = winnerUsers > 1 ? "¡Campeones del PoliGol!" : "¡Campeón del PoliGol!";
   card.append(flag, name, sub);
+  // v1.3 (SPEC D): reason como subtítulo extra cuando aplica.
+  if (msg.reason === "golden" || msg.reason === "time") {
+    const why = document.createElement("div");
+    why.className = "winner-reason overlay-sub";
+    why.textContent = msg.reason === "golden" ? "¡Gol de oro!" : "Se terminó el tiempo";
+    card.appendChild(why);
+  }
   overlayEl.appendChild(card);
 
   if (endgameActions) endgameActions.classList.remove("hidden");
@@ -1520,10 +1851,12 @@ on(btnExit, "click", () => goHome(true));
 /* ================================= Scoreboard ================================ */
 // ffa: un item por jugador (cada jugador es un equipo de 1, como v1).
 // 1v1/2v2: dos pills de EQUIPO con las banderas de los integrantes (SPEC v1.1).
+// duo (v1.3): una pill por EQUIPO-USUARIO (bandera + nombre del usuario + score;
+// los 2 cuerpos del usuario no se duplican: team.users dedupea por owner).
 function buildScoreboard() {
   scoreboardEl.textContent = "";
   scoreItems = [];
-  const teamMode = match.mode === "1v1" || match.mode === "2v2";
+  const teamMode = match.mode === "1v1" || match.mode === "2v2" || match.mode === "duo";
   for (const team of match.teams) {
     const item = document.createElement("div");
     item.className =
@@ -1535,7 +1868,9 @@ function buildScoreboard() {
     flag.textContent = team.flags || "🏳️";
     const name = document.createElement("span");
     name.className = "score-name";
-    name.textContent = team.members.map((m) => m.name).join(" + ");
+    name.textContent = (team.users && team.users.length ? team.users : team.members)
+      .map((m) => bodyUserName(m))
+      .join(" + ");
     const val = document.createElement("span");
     val.className = "score-value";
     val.textContent = "0";
@@ -1600,6 +1935,132 @@ function showCountdown(nums, stepMs, finale) {
   );
 }
 
+/* ================== Reloj de partido + hint duo (v1.3, SPEC C/D) ==================
+ * #match-clock (mm:ss, visible solo target=time; "GOL DE ORO" dorado pulsante
+ * en golden) y #duo-keys-hint (mapeo de teclas duo, 3 s). Si el HTML aún no
+ * trae esos nodos, se crean on-demand con un <style> de respaldo mínimo. */
+let matchClockEl = $("match-clock");
+let duoKeysHintEl = $("duo-keys-hint");
+let duoHintTimer = 0;
+let v13StyleDone = false;
+
+function injectV13Style() {
+  if (v13StyleDone) return;
+  v13StyleDone = true;
+  const st = document.createElement("style");
+  st.textContent =
+    "#match-clock{position:absolute;top:calc(64px + env(safe-area-inset-top,0px));" +
+    "left:50%;transform:translateX(-50%);z-index:6;pointer-events:none;" +
+    "font:800 22px/1 system-ui,sans-serif;letter-spacing:0.08em;color:#fff;" +
+    "background:rgba(7,11,22,0.6);border:1px solid rgba(255,255,255,0.18);" +
+    "border-radius:999px;padding:6px 16px;text-shadow:0 2px 8px rgba(0,0,0,0.6);}" +
+    "#match-clock.golden{color:#f5c542;border-color:rgba(245,197,66,0.6);" +
+    "animation:pg-gold 0.85s ease-in-out infinite;}" +
+    "@keyframes pg-gold{0%,100%{opacity:1;transform:translateX(-50%) scale(1);}" +
+    "50%{opacity:0.7;transform:translateX(-50%) scale(1.08);}}" +
+    "#duo-keys-hint{position:fixed;top:22%;left:50%;transform:translateX(-50%);" +
+    "z-index:40;pointer-events:none;text-align:center;" +
+    "font:600 15px/1.7 system-ui,sans-serif;color:#fff;" +
+    "background:rgba(7,11,22,0.82);border:1px solid rgba(255,255,255,0.16);" +
+    "border-radius:14px;padding:12px 20px;box-shadow:0 12px 40px rgba(0,0,0,0.5);}";
+  document.head.appendChild(st);
+}
+
+function ensureMatchClock() {
+  if (!matchClockEl) {
+    matchClockEl = $("match-clock");
+    if (!matchClockEl && screenGame) {
+      injectV13Style();
+      matchClockEl = document.createElement("div");
+      matchClockEl.id = "match-clock";
+      matchClockEl.className = "match-clock hidden";
+      screenGame.appendChild(matchClockEl);
+    }
+  }
+  return matchClockEl;
+}
+
+function fmtClock(secs) {
+  const s = Math.max(0, Math.round(secs));
+  const mm = String(Math.floor(s / 60));
+  const ss = String(s % 60);
+  return (mm.length < 2 ? "0" + mm : mm) + ":" + (ss.length < 2 ? "0" + ss : ss);
+}
+
+// tl = segundos restantes (o null). En golden el texto fijo "GOL DE ORO" manda.
+function updateMatchClock(tl) {
+  const golden = !!(match && match.golden);
+  if (!golden && (typeof tl !== "number" || !isFinite(tl))) {
+    hideMatchClock();
+    return;
+  }
+  const el = ensureMatchClock();
+  if (!el) return;
+  if (golden) {
+    el.textContent = "GOL DE ORO";
+    el.classList.add("golden");
+  } else {
+    el.textContent = fmtClock(tl);
+    el.classList.remove("golden");
+  }
+  el.classList.remove("hidden");
+}
+
+function hideMatchClock() {
+  if (!matchClockEl) return; // sin nodo no hay nada que ocultar (no crear de más)
+  matchClockEl.classList.add("hidden");
+  matchClockEl.classList.remove("golden");
+  matchClockEl.textContent = "";
+}
+
+// Hint de teclas duo: 3 s al entrar a un partido duo con teclado (SPEC C).
+function showDuoKeysHint() {
+  if (!duoKeysHintEl) {
+    duoKeysHintEl = $("duo-keys-hint");
+    if (!duoKeysHintEl && screenGame) {
+      injectV13Style();
+      duoKeysHintEl = document.createElement("div");
+      duoKeysHintEl.id = "duo-keys-hint";
+      duoKeysHintEl.className = "duo-keys-hint";
+      const a = document.createElement("div");
+      a.textContent = "① WASD mover · F patear · G barrer";
+      const b = document.createElement("div");
+      b.textContent = "② Flechas mover · L patear · K barrer";
+      duoKeysHintEl.append(a, b);
+      screenGame.appendChild(duoKeysHintEl);
+    }
+  }
+  if (!duoKeysHintEl) return;
+  duoKeysHintEl.classList.remove("hidden");
+  clearTimeout(duoHintTimer);
+  // 3.6 s: la animación CSS duo-hint (3.4 s, forwards) hace el fade-out sola;
+  // re-agregar .hidden recién después evita cortar el fade a mitad de camino.
+  duoHintTimer = setTimeout(() => {
+    duoHintTimer = 0;
+    if (duoKeysHintEl) duoKeysHintEl.classList.add("hidden"); // se oculta solo
+  }, 3600);
+}
+
+function hideDuoKeysHint() {
+  if (duoHintTimer) {
+    clearTimeout(duoHintTimer);
+    duoHintTimer = 0;
+  }
+  if (duoKeysHintEl) duoKeysHintEl.classList.add("hidden");
+}
+
+// v1.3 (SPEC C): los botones ⚽/🦵 se ocultan SOLO en duo (las dos zonas
+// táctiles cubren la pantalla); en los demás modos quedan como v1.2.
+// Además de .hidden en cada botón, se togglea .duo-mode en #touch-controls y
+// #screen-game (contrato del CSS v1.3: .duo-mode .touch-buttons{display:none}).
+function updateTouchButtonsVisibility(duo) {
+  if (btnKick) btnKick.classList.toggle("hidden", !!duo);
+  if (btnTackle) btnTackle.classList.toggle("hidden", !!duo);
+  const touchControls = $("touch-controls");
+  if (touchControls) touchControls.classList.toggle("duo-mode", !!duo);
+  if (screenGame) screenGame.classList.toggle("duo-mode", !!duo);
+}
+
 /* =================================== Toasts ================================== */
 function toast(message) {
   const t = document.createElement("div");
@@ -1613,25 +2074,30 @@ function toast(message) {
 }
 
 /* =================================== Input =================================== */
-const KEYMAP = {
-  ArrowUp: "up",
-  KeyW: "up",
-  ArrowDown: "down",
-  KeyS: "down",
-  ArrowLeft: "left",
-  KeyA: "left",
-  ArrowRight: "right",
-  KeyD: "right",
+// v1.3: los códigos crudos viven en keysDown; el vector se arma por KEYSET.
+// No-duo: WASD y flechas juntos (= v1.2). Duo: A = WASD, B = flechas (SPEC C).
+const MOVE_CODES = new Set([
+  "KeyW", "KeyA", "KeyS", "KeyD",
+  "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+]);
+const KEYSET_ALL = {
+  up: ["KeyW", "ArrowUp"], down: ["KeyS", "ArrowDown"],
+  left: ["KeyA", "ArrowLeft"], right: ["KeyD", "ArrowRight"],
 };
+const KEYSET_A = { up: ["KeyW"], down: ["KeyS"], left: ["KeyA"], right: ["KeyD"] };
+const KEYSET_B = { up: ["ArrowUp"], down: ["ArrowDown"], left: ["ArrowLeft"], right: ["ArrowRight"] };
 
-function currentInput() {
-  if (joy.active) return { mx: joy.mx, my: joy.my };
+function keyVec(set) {
+  const has = (codes) => {
+    for (const c of codes) if (keysDown.has(c)) return true;
+    return false;
+  };
   let x = 0;
   let y = 0;
-  if (keys.has("up")) y -= 1;
-  if (keys.has("down")) y += 1;
-  if (keys.has("left")) x -= 1;
-  if (keys.has("right")) x += 1;
+  if (has(set.up)) y -= 1;
+  if (has(set.down)) y += 1;
+  if (has(set.left)) x -= 1;
+  if (has(set.right)) x += 1;
   const l = Math.hypot(x, y);
   if (l > 1) {
     x /= l;
@@ -1640,55 +2106,83 @@ function currentInput() {
   return { mx: x, my: y };
 }
 
-/* ---------------------- Envío de input v1.2 (SPEC A) ----------------------
- * Único punto de salida de {type:"input", seq, mx, my, kick, tackle}:
- * - INMEDIATO al cambiar el vector de movimiento o al presionar kick/tackle,
- *   con cap de 60 msgs/s (INPUT_MIN_GAP_MS); si el cap pospone el envío, la
- *   acción queda latcheada (queuedKick/queuedTackle) y el cambio lo reintenta
- *   el próximo rAF o el keepalive.
+// Input de movimiento actual del cuerpo `slot` (0 = A, 1 = B; B solo en duo).
+function currentInputFor(slot) {
+  const j = joys[slot];
+  if (j.active) return { mx: j.mx, my: j.my };
+  if (isDuo()) return keyVec(slot === 1 ? KEYSET_B : KEYSET_A);
+  return keyVec(KEYSET_ALL);
+}
+
+/* ---------------------- Envío de input v1.2/v1.3 (SPEC A/B) ----------------------
+ * Único punto de salida de {type:"input", seq, mx, my, kick, tackle[, b]}:
+ * - INMEDIATO al cambiar el vector de movimiento (de cualquier cuerpo) o al
+ *   presionar kick/tackle, con cap de 60 msgs/s (INPUT_MIN_GAP_MS); si el cap
+ *   pospone el envío, la acción queda latcheada (queuedActs[slot]) y el cambio
+ *   lo reintenta el próximo rAF o el keepalive.
  * - keepalive a 20 Hz mientras se juega (el server necesita seq frescos).
- * - seq incremental por conexión (arranca en 1); kick/tackle edge-trigger. */
+ * - seq incremental por conexión (arranca en 1); kick/tackle edge-trigger.
+ * - v1.3 duo: UN solo mensaje combinado — campos planos = cuerpo A (slot 0),
+ *   objeto `b` = cuerpo B (slot 1), un solo seq para ambos. En no-duo no se
+ *   manda `b` (idéntico a v1.2; el server lo ignoraría igual). */
 function flushInput(force) {
   if (phase !== "game" || ended || !ws || ws.readyState !== WebSocket.OPEN) return;
-  const v = currentInput();
-  const changed = v.mx !== lastSentMx || v.my !== lastSentMy;
-  if (!force && !changed && !queuedKick && !queuedTackle) return;
+  const duo = isDuo();
+  const a = currentInputFor(0);
+  const b = duo ? currentInputFor(1) : null;
+  const qa = queuedActs[0];
+  const qb = queuedActs[1];
+  const changed =
+    a.mx !== lastSentA.mx ||
+    a.my !== lastSentA.my ||
+    (duo && (b.mx !== lastSentB.mx || b.my !== lastSentB.my));
+  const hasAct = qa.kick || qa.tackle || (duo && (qb.kick || qb.tackle));
+  if (!force && !changed && !hasAct) return;
   const now = performance.now();
   if (now - lastInputSendT < INPUT_MIN_GAP_MS) return; // cap 60/s
   inputSeq += 1;
-  ws.send(
-    JSON.stringify({
-      type: "input",
-      seq: inputSeq,
-      mx: v.mx,
-      my: v.my,
-      kick: queuedKick,
-      tackle: queuedTackle,
-    })
-  );
-  queuedKick = false;
-  queuedTackle = false;
-  lastSentMx = v.mx;
-  lastSentMy = v.my;
+  const msg = {
+    type: "input",
+    seq: inputSeq,
+    mx: a.mx,
+    my: a.my,
+    kick: qa.kick,
+    tackle: qa.tackle,
+  };
+  if (duo) msg.b = { mx: b.mx, my: b.my, kick: qb.kick, tackle: qb.tackle };
+  ws.send(JSON.stringify(msg));
+  qa.kick = false;
+  qa.tackle = false;
+  qb.kick = false;
+  qb.tackle = false;
+  lastSentA.mx = a.mx;
+  lastSentA.my = a.my;
+  if (duo) {
+    lastSentB.mx = b.mx;
+    lastSentB.my = b.my;
+  }
   lastInputSendT = now;
 }
 
 // Feedback local INMEDIATO de la patada (SPEC A): anillo + SFX + squash al
 // presionar, sin esperar el round-trip. El server sigue siendo autoritativo
-// (con kick buffer de 160 ms); la detección de handleState saltea el propio id.
-function localKickFeedback() {
-  if (pred && (pred.stun > 0.01 || pred.slide > 0.01)) return; // sin control: no sonar en vano
+// (con kick buffer de 160 ms); la detección de handleState saltea los cuerpos
+// propios. v1.3: POR CUERPO (slot) — cada cuerpo tiene su pred y su cooldown.
+function localKickFeedback(slot) {
+  const sb = selfBody(slot);
+  const pr = sb ? sb.pred : null;
+  if (pr && (pr.stun > 0.01 || pr.slide > 0.01)) return; // sin control: no sonar en vano
   const now = performance.now();
   // Cooldown LOCAL (mismo patrón que tackleCdUntil): el kc del snapshot llega
   // ~interpDelay + RTT/2 tarde, así que dos presses dentro de esa ventana harían
   // sonar un kick fantasma que el server va a rechazar por KICK_COOLDOWN.
-  if (now < kickCdUntil) return;
+  if (now < kickCdUntil[slot]) return;
   const last = snaps.length ? snaps[snaps.length - 1] : null;
-  const meSnap = last ? last.players.get(myId) : null;
+  const meSnap = last && sb ? last.players.get(sb.id) : null;
   if (meSnap && meSnap.kc > 0.05) return; // todavía en cooldown conocido
   sfxKick();
-  const px = pred ? pred.x + corrX : meSnap ? meSnap.x : null;
-  const py = pred ? pred.y + corrY : meSnap ? meSnap.y : null;
+  const px = pr ? pr.x + sb.corrX : meSnap ? meSnap.x : null;
+  const py = pr ? pr.y + sb.corrY : meSnap ? meSnap.y : null;
   if (px !== null && py !== null) {
     ringFx.push({ x: px, y: py, t: now });
     // Squash de la pelota si está al alcance real de la patada (KICK_RANGE 44).
@@ -1697,26 +2191,28 @@ function localKickFeedback() {
       // La patada va a ejecutar de verdad en el server (pelota en rango): armar el
       // cooldown local. Fuera de rango NO se arma (el server tampoco quema el kc:
       // kick buffer 160 ms), para no silenciar un kick real posterior.
-      kickCdUntil = now + KICK_COOLDOWN * 1000;
+      kickCdUntil[slot] = now + KICK_COOLDOWN * 1000;
     }
   }
 }
 
 // Feedback local INMEDIATO de la barrida: slide-whistle + polvito al presionar.
-function localTackleFeedback() {
+function localTackleFeedback(slot) {
   const now = performance.now();
-  if (now < tackleCdUntil) return; // cooldown visual conocido
-  if (pred && (pred.stun > 0.01 || pred.slide > 0.01)) return;
+  if (now < tackleCdUntil[slot]) return; // cooldown visual conocido
+  const sb = selfBody(slot);
+  const pr = sb ? sb.pred : null;
+  if (pr && (pr.stun > 0.01 || pr.slide > 0.01)) return;
   sfxTackle();
-  tackleCdUntil = now + TACKLE_COOLDOWN * 1000;
-  if (pred) {
+  tackleCdUntil[slot] = now + TACKLE_COOLDOWN * 1000;
+  if (pr) {
     const n = Math.max(2, Math.round(4 * fxMult()));
     for (let i = 0; i < n; i++) {
       dustFx.push({
-        x: pred.x + corrX - pred.fx * 6 + (Math.random() - 0.5) * 8,
-        y: pred.y + corrY - pred.fy * 6 + (Math.random() - 0.5) * 8,
-        vx: -pred.fx * (40 + Math.random() * 50) + (Math.random() - 0.5) * 40,
-        vy: -pred.fy * (40 + Math.random() * 50) + (Math.random() - 0.5) * 40 - 14,
+        x: pr.x + sb.corrX - pr.fx * 6 + (Math.random() - 0.5) * 8,
+        y: pr.y + sb.corrY - pr.fy * 6 + (Math.random() - 0.5) * 8,
+        vx: -pr.fx * (40 + Math.random() * 50) + (Math.random() - 0.5) * 40,
+        vy: -pr.fy * (40 + Math.random() * 50) + (Math.random() - 0.5) * 40 - 14,
         r: 2 + Math.random() * 2.6,
         life: 0.45,
         maxLife: 0.45,
@@ -1725,17 +2221,19 @@ function localTackleFeedback() {
   }
 }
 
-function pressKick() {
+function pressKick(slot) {
   if (phase !== "game" || ended) return;
-  localKickFeedback();
-  queuedKick = true;
+  const s = slot === 1 ? 1 : 0;
+  localKickFeedback(s);
+  queuedActs[s].kick = true;
   flushInput(false);
 }
 
-function pressTackle() {
+function pressTackle(slot) {
   if (phase !== "game" || ended) return;
-  localTackleFeedback();
-  queuedTackle = true;
+  const s = slot === 1 ? 1 : 0;
+  localTackleFeedback(s);
+  queuedActs[s].tackle = true;
   flushInput(false);
 }
 
@@ -1753,92 +2251,152 @@ function stopInputLoop() {
     clearInterval(inputTimer);
     inputTimer = 0;
   }
-  queuedKick = false;
-  queuedTackle = false;
-  keys.clear();
-  joyReset();
+  queuedActs[0].kick = queuedActs[0].tackle = false;
+  queuedActs[1].kick = queuedActs[1].tackle = false;
+  keysDown.clear();
+  joyReset(0);
+  joyReset(1);
 }
 
 window.addEventListener("keydown", (e) => {
   if (phase !== "game") return;
-  const dir = KEYMAP[e.code];
-  if (dir) {
-    keys.add(dir);
+  if (MOVE_CODES.has(e.code)) {
+    keysDown.add(e.code);
     e.preventDefault();
     flushInput(false); // input INMEDIATO al cambiar el movimiento (SPEC A)
     return;
   }
   if (e.repeat) return;
-  if (e.code === "Space" || e.code === "KeyJ") {
+  if (isDuo()) {
+    // v1.3 (SPEC C): cuerpo A = F patear / G barrer; cuerpo B = L patear / K barrer.
+    if (e.code === "KeyF") {
+      e.preventDefault();
+      pressKick(0);
+    } else if (e.code === "KeyG") {
+      e.preventDefault();
+      pressTackle(0);
+    } else if (e.code === "KeyL") {
+      e.preventDefault();
+      pressKick(1);
+    } else if (e.code === "KeyK") {
+      e.preventDefault();
+      pressTackle(1);
+    }
+  } else if (e.code === "Space" || e.code === "KeyJ") {
     e.preventDefault();
-    pressKick();
+    pressKick(0);
   } else if (e.key === "Shift" || e.code === "KeyK") {
     e.preventDefault();
-    pressTackle();
+    pressTackle(0);
   }
 });
 
 window.addEventListener("keyup", (e) => {
-  const dir = KEYMAP[e.code];
-  if (dir) {
-    keys.delete(dir);
+  if (keysDown.delete(e.code)) {
     flushInput(false); // freno/cambio inmediato
   }
 });
 
 window.addEventListener("blur", () => {
-  keys.clear();
+  keysDown.clear();
   flushInput(false); // soltar todo al perder foco: avisar al server ya
 });
 
-/* ------------------------------ Joystick DINÁMICO ------------------------------ */
-// v1.1: el joystick aparece centrado donde el dedo toca la MITAD IZQUIERDA de la
-// pantalla durante el partido (no posición fija). Se posiciona con estilos inline
-// (position:fixed + translate(-50%,-50%)) para no depender del CSS.
-function joyStart(t) {
-  joy.active = true;
-  joy.id = t.identifier;
-  joy.ox = t.clientX;
-  joy.oy = t.clientY;
-  joy.mx = 0;
-  joy.my = 0;
-  if (joystickEl) {
-    joystickEl.classList.add("active");
-    joystickEl.style.position = "fixed";
-    joystickEl.style.left = t.clientX + "px";
-    joystickEl.style.top = t.clientY + "px";
-    joystickEl.style.transform = "translate(-50%, -50%)";
-    joystickEl.style.visibility = "visible";
-  }
-  if (joystickStick) joystickStick.style.transform = "";
+/* ------------------------------ Joysticks DINÁMICOS ------------------------------ */
+// v1.1: el joystick aparece centrado donde toca el dedo (no posición fija) y se
+// posiciona con estilos inline (position:fixed + translate(-50%,-50%)) para no
+// depender del CSS. v1.3 (SPEC C): en duo la pantalla se parte en DOS ZONAS
+// (mitad izquierda = cuerpo A, derecha = cuerpo B) con un joystick INDEPENDIENTE
+// por zona (multitouch por touch identifier, un dedo por zona) + gestos:
+//   TAP  (< 220 ms y < 12 px)  → patear ese cuerpo (el tap no mueve)
+//   DOBLE TAP (≤ 300 ms del 1º) → barrida (el 1º ya pateó: patada y barrida)
+// En modos no-duo: una sola zona (mitad izquierda), idéntico a v1.2, sin gestos.
+
+// El visual de la zona B es un CLON de #touch-joystick (se crea on-demand: el
+// HTML v1.2 trae uno solo); hereda el CSS del original.
+let joyElB = null;
+let joyStickB = null;
+
+function ensureJoyElB() {
+  if (joyElB || !joystickEl || !joystickEl.parentNode) return;
+  joyElB = joystickEl.cloneNode(true);
+  joyElB.removeAttribute("id");
+  joyElB.classList.add("joystick-b");
+  joyElB.classList.remove("active");
+  joyElB.style.visibility = "hidden";
+  joystickEl.parentNode.appendChild(joyElB);
+  joyStickB = joyElB.querySelector(".joystick-stick");
 }
 
-function joyMove(t) {
-  let dx = t.clientX - joy.ox;
-  let dy = t.clientY - joy.oy;
+function joyEls(zone) {
+  if (zone === 1) {
+    ensureJoyElB();
+    return { el: joyElB, stick: joyStickB };
+  }
+  return { el: joystickEl, stick: joystickStick };
+}
+
+function joyStart(zone, t) {
+  const j = joys[zone];
+  j.active = true;
+  j.id = t.identifier;
+  j.ox = t.clientX;
+  j.oy = t.clientY;
+  j.mx = 0;
+  j.my = 0;
+  j.moved = false;
+  j.startT = performance.now();
+  const parts = joyEls(zone);
+  if (parts.el) {
+    parts.el.classList.add("active");
+    parts.el.style.position = "fixed";
+    parts.el.style.left = t.clientX + "px";
+    parts.el.style.top = t.clientY + "px";
+    parts.el.style.transform = "translate(-50%, -50%)";
+    parts.el.style.visibility = "visible";
+  }
+  if (parts.stick) parts.stick.style.transform = "";
+}
+
+function joyMove(zone, t) {
+  const j = joys[zone];
+  let dx = t.clientX - j.ox;
+  let dy = t.clientY - j.oy;
   const d = Math.hypot(dx, dy);
+  // En duo el movimiento arranca recién al superar el umbral de TAP (12 px):
+  // "el tap no mueve, patea" (SPEC C). En no-duo responde desde el primer px (v1.2).
+  if (isDuo() && !j.moved) {
+    if (d < TAP_MOVE_PX) return;
+    j.moved = true;
+  }
   if (d > JOY_RADIUS) {
     dx *= JOY_RADIUS / d;
     dy *= JOY_RADIUS / d;
   }
-  if (joystickStick) {
-    joystickStick.style.transform =
+  const parts = joyEls(zone);
+  if (parts.stick) {
+    parts.stick.style.transform =
       "translate(" + dx.toFixed(1) + "px, " + dy.toFixed(1) + "px)";
   }
-  joy.mx = dx / JOY_RADIUS;
-  joy.my = dy / JOY_RADIUS;
+  j.mx = dx / JOY_RADIUS;
+  j.my = dy / JOY_RADIUS;
   flushInput(false); // input inmediato al mover el stick (cap 60/s adentro)
 }
 
-function joyReset() {
-  joy.active = false;
-  joy.id = null;
-  joy.mx = 0;
-  joy.my = 0;
-  if (joystickStick) joystickStick.style.transform = "";
-  if (joystickEl) {
-    joystickEl.classList.remove("active");
-    joystickEl.style.visibility = "hidden";
+function joyReset(zone) {
+  const j = joys[zone];
+  j.active = false;
+  j.id = null;
+  j.mx = 0;
+  j.my = 0;
+  j.moved = false;
+  // Ojo: NO usar joyEls acá (crearía el clon de la zona B sin necesidad).
+  const el = zone === 1 ? joyElB : joystickEl;
+  const stick = zone === 1 ? joyStickB : joystickStick;
+  if (stick) stick.style.transform = "";
+  if (el) {
+    el.classList.remove("active");
+    el.style.visibility = "hidden";
   }
 }
 
@@ -1846,14 +2404,20 @@ window.addEventListener(
   "touchstart",
   (e) => {
     if (phase !== "game" || ended) return;
+    const duo = isDuo();
     for (const t of e.changedTouches) {
-      if (joy.active) break;
-      if (t.clientX > window.innerWidth / 2) continue; // solo mitad izquierda
       const tgt = t.target;
       // No robar toques destinados a botones/links/modal (kick los maneja aparte).
       if (tgt && tgt.closest && tgt.closest("button, a, #options-modal")) continue;
+      let zone = 0;
+      if (duo) {
+        zone = t.clientX < window.innerWidth / 2 ? 0 : 1; // mitades A / B (SPEC C)
+      } else if (t.clientX > window.innerWidth / 2) {
+        continue; // v1.2: solo mitad izquierda
+      }
+      if (joys[zone].active) continue; // un dedo por zona
       e.preventDefault();
-      joyStart(t);
+      joyStart(zone, t);
     }
   },
   { passive: false }
@@ -1862,28 +2426,43 @@ window.addEventListener(
 window.addEventListener(
   "touchmove",
   (e) => {
-    if (!joy.active) return;
     for (const t of e.changedTouches) {
-      if (t.identifier === joy.id) {
-        e.preventDefault();
-        joyMove(t);
+      for (let z = 0; z < 2; z++) {
+        const j = joys[z];
+        if (j.active && t.identifier === j.id) {
+          e.preventDefault();
+          joyMove(z, t);
+        }
       }
     }
   },
   { passive: false }
 );
 
-function joyEnd(e) {
-  if (!joy.active) return;
+function joyEnd(e, cancelled) {
   for (const t of e.changedTouches) {
-    if (t.identifier === joy.id) {
-      joyReset();
+    for (let z = 0; z < 2; z++) {
+      const j = joys[z];
+      if (!j.active || t.identifier !== j.id) continue;
+      const now = performance.now();
+      // Gestos TAP / DOBLE TAP (v1.3, solo duo): levantar rápido y sin arrastre
+      // patea ese cuerpo; un segundo tap ≤ 300 ms suma la barrida.
+      if (!cancelled && isDuo() && !j.moved && now - j.startT < TAP_MS) {
+        pressKick(z);
+        if (now - j.lastTapT <= DOUBLE_TAP_MS) {
+          pressTackle(z);
+          j.lastTapT = -1e9; // un tercer tap arranca una secuencia nueva
+        } else {
+          j.lastTapT = now;
+        }
+      }
+      joyReset(z);
       flushInput(false); // freno inmediato
     }
   }
 }
-window.addEventListener("touchend", joyEnd);
-window.addEventListener("touchcancel", joyEnd);
+window.addEventListener("touchend", (e) => joyEnd(e, false));
+window.addEventListener("touchcancel", (e) => joyEnd(e, true));
 
 function bindTouchButton(btn, onPress) {
   if (!btn) return;
@@ -1908,8 +2487,9 @@ function bindTouchButton(btn, onPress) {
     onPress();
   });
 }
-bindTouchButton(btnKick, pressKick);
-bindTouchButton(btnTackle, pressTackle);
+// Los botones ⚽/🦵 siempre operan el cuerpo A (en duo están ocultos, SPEC C).
+bindTouchButton(btnKick, () => pressKick(0));
+bindTouchButton(btnTackle, () => pressTackle(0));
 
 /* ==================== Mobile: fullscreen, orientación y vibración ==================== */
 function enterGameDisplay() {
@@ -2370,8 +2950,18 @@ function commentator(event, data) {
     case "start": {
       const arr = ["¡Arranca el partido!", "¡Rueda la pelota!"];
       if (match && match.players.length) {
-        const someone = match.players[Math.floor(Math.random() * match.players.length)];
-        arr.push("Sale jugando " + someone.name + "...");
+        // v1.3: nombres de USUARIOS (en duo cada usuario tiene 2 cuerpos).
+        const pool = [];
+        const seen = new Set();
+        for (const p of match.players) {
+          const nm = bodyUserName(p);
+          if (!nm || seen.has(nm)) continue;
+          seen.add(nm);
+          pool.push(nm);
+        }
+        if (pool.length) {
+          arr.push("Sale jugando " + pool[Math.floor(Math.random() * pool.length)] + "...");
+        }
       }
       text = pickPhrase(arr);
       prio = 2;
@@ -2653,14 +3243,17 @@ function voicePackSay(event) {
   return true;
 }
 
-/* ================= Predicción del PROPIO jugador (v1.2, SPEC A) =================
- * El propio jugador se simula LOCALMENTE con la física exacta del server
+/* ============ Predicción de los CUERPOS PROPIOS (v1.2 SPEC A, v1.3 ×N) ============
+ * Cada cuerpo propio se simula LOCALMENTE con la física exacta del server
  * (tickRoom): ACCEL/FRICTION/MAX_SPEED del estadio + confinamiento contra todas
  * las paredes; stun y slide bloquean el control. Cada frame del rAF integra con
- * dt real y registra {seq, mx, my, dt} en pendingInputs. Al llegar un state se
+ * dt real y registra {seq, a:{mx,my}, b:{mx,my}, dt} en pendingInputs (UNA
+ * entrada cubre ambos cuerpos: mismo seq, SPEC v1.3 B). Al llegar un state se
  * parte del estado autoritativo (pos/vel + iq), se descartan los pendientes ya
- * aplicados (seq ≤ iq) y se re-simulan los restantes. El render del propio
- * jugador usa SIEMPRE pred + offset de corrección (decae ~120 ms, snap > 80 u). */
+ * aplicados (seq ≤ iq) y se re-simulan los restantes POR CUERPO con el input de
+ * su slot. La sim de un cuerpo (simSelfStep) es LA MISMA que en v1.2 — no se
+ * duplica ninguna fórmula. El render de los cuerpos propios usa SIEMPRE
+ * pred + offset de corrección (decae ~120 ms, snap > 80 u). */
 
 // Constantes efectivas de física del estadio (= stadiumPhysics del server con la
 // base v1.2): solo "nieve" toca el movimiento del jugador (ACCEL×0.55, FRICTION×0.45).
@@ -2737,84 +3330,119 @@ function simSelfStep(b, mx, my, dt, paused) {
   }
 }
 
-// Reconciliación al llegar un state (SPEC A): estado server del propio jugador
-// + iq → descartar pendientes acked → re-simular los restantes → nueva pred.
-// La diferencia con el render anterior se absorbe con corrX/corrY.
-function reconcileSelf(me, paused) {
+// Reconciliación al llegar un state (SPEC A, v1.3 ×N): por CADA cuerpo propio,
+// estado server + iq → descartar pendientes acked → re-simular los restantes
+// con el input de SU slot → nueva pred. La diferencia con el render anterior
+// se absorbe con corrX/corrY por cuerpo. pendingInputs es compartido: un solo
+// seq cubre ambos cuerpos y el iq viaja igual en los dos (SPEC v1.3 B).
+function reconcileSelf(pm, paused) {
   lastPaused = paused;
-  // iq = último seq aplicado por el server. Si faltara (server viejo), se da
-  // todo por aplicado: pred sigue al server y el offset suaviza el resto.
-  const acked = me.iq !== null ? me.iq : inputSeq;
+  if (!selfPred.length) return;
+  // iq = último seq aplicado por el server (igual en ambos cuerpos propios).
+  // Si faltara (server viejo), se da todo por aplicado: pred sigue al server
+  // y el offset suaviza el resto.
+  let acked = null;
+  for (const sb of selfPred) {
+    const me = pm.get(sb.id);
+    if (me && me.iq !== null) {
+      acked = me.iq;
+      break;
+    }
+  }
+  if (acked === null) acked = inputSeq;
   while (pendingInputs.length && pendingInputs[0].seq <= acked) pendingInputs.shift();
 
-  const hadPred = pred !== null;
-  const prevRX = hadPred ? pred.x + corrX : 0;
-  const prevRY = hadPred ? pred.y + corrY : 0;
+  for (const sb of selfPred) {
+    const me = pm.get(sb.id);
+    if (!me) continue;
+    const hadPred = sb.pred !== null;
+    const prevRX = hadPred ? sb.pred.x + sb.corrX : 0;
+    const prevRY = hadPred ? sb.pred.y + sb.corrY : 0;
 
-  const sim = {
-    x: me.x,
-    y: me.y,
-    vx: me.vx,
-    vy: me.vy,
-    fx: me.fx,
-    fy: me.fy,
-    stun: me.stun,
-    slide: me.slide,
-    // Durante el slide el facing quedó fijo en la dirección de barrida (server).
-    sdx: me.fx,
-    sdy: me.fy,
-  };
-  for (const pi of pendingInputs) simSelfStep(sim, pi.mx, pi.my, pi.dt, paused);
-  pred = sim;
-
-  if (hadPred) {
-    // Suavizado: offset = render anterior − predicción nueva; decae ~120 ms.
-    corrX = prevRX - sim.x;
-    corrY = prevRY - sim.y;
-    if (Math.hypot(corrX, corrY) > CORR_SNAP) {
-      corrX = 0; // corrección enorme (teleport/lag spike): snap directo
-      corrY = 0;
+    const sim = {
+      x: me.x,
+      y: me.y,
+      vx: me.vx,
+      vy: me.vy,
+      fx: me.fx,
+      fy: me.fy,
+      stun: me.stun,
+      slide: me.slide,
+      // Durante el slide el facing quedó fijo en la dirección de barrida (server).
+      sdx: me.fx,
+      sdy: me.fy,
+    };
+    for (const pi of pendingInputs) {
+      const inp = sb.slot === 1 ? pi.b : pi.a;
+      simSelfStep(sim, inp.mx, inp.my, pi.dt, paused);
     }
-  } else {
-    corrX = 0;
-    corrY = 0;
+    sb.pred = sim;
+
+    if (hadPred) {
+      // Suavizado: offset = render anterior − predicción nueva; decae ~120 ms.
+      sb.corrX = prevRX - sim.x;
+      sb.corrY = prevRY - sim.y;
+      if (Math.hypot(sb.corrX, sb.corrY) > CORR_SNAP) {
+        sb.corrX = 0; // corrección enorme (teleport/lag spike): snap directo
+        sb.corrY = 0;
+      }
+    } else {
+      sb.corrX = 0;
+      sb.corrY = 0;
+    }
   }
 }
 
-// Avance de la predicción en cada frame del rAF (dt real, SPEC A).
+// Avance de la predicción en cada frame del rAF (dt real, SPEC A). v1.3: una
+// sola entrada de pendingInputs por frame con el input de AMBOS cuerpos.
 function updatePrediction(dt) {
   if (!match || phase !== "game") return;
   flushInput(false); // reintento de cambios/acciones que el cap de 60/s pospuso
-  if (!pred || ended) return;
-  const v = currentInput();
-  pendingInputs.push({ seq: inputSeq, mx: v.mx, my: v.my, dt });
+  if (ended || !selfPred.length) return;
+  let anyPred = false;
+  for (const sb of selfPred) {
+    if (sb.pred) {
+      anyPred = true;
+      break;
+    }
+  }
+  if (!anyPred) return; // todavía sin estado autoritativo (pre primer state)
+  const a = currentInputFor(0);
+  const b = isDuo() ? currentInputFor(1) : { mx: 0, my: 0 };
+  pendingInputs.push({ seq: inputSeq, a: { mx: a.mx, my: a.my }, b: { mx: b.mx, my: b.my }, dt });
   if (pendingInputs.length > PENDING_MAX) {
     pendingInputs.splice(0, pendingInputs.length - PENDING_MAX);
   }
-  simSelfStep(pred, v.mx, v.my, dt, lastPaused);
   // El offset de corrección decae exponencialmente a 0 en ~120 ms.
   const k = Math.exp(-CORR_DECAY * dt);
-  corrX *= k;
-  corrY *= k;
-  if (Math.abs(corrX) < 0.01) corrX = 0;
-  if (Math.abs(corrY) < 0.01) corrY = 0;
+  for (const sb of selfPred) {
+    if (!sb.pred) continue;
+    const inp = sb.slot === 1 ? b : a;
+    simSelfStep(sb.pred, inp.mx, inp.my, dt, lastPaused);
+    sb.corrX *= k;
+    sb.corrY *= k;
+    if (Math.abs(sb.corrX) < 0.01) sb.corrX = 0;
+    if (Math.abs(sb.corrY) < 0.01) sb.corrY = 0;
+  }
 }
 
 // Reset de la predicción (start/kickoff/salida): el próximo state la
 // re-inicializa desde el estado autoritativo, sin offset (snap limpio).
 function resetPrediction() {
-  pred = null;
+  for (const sb of selfPred) {
+    sb.pred = null;
+    sb.corrX = 0;
+    sb.corrY = 0;
+  }
   pendingInputs = [];
-  corrX = 0;
-  corrY = 0;
-  queuedKick = false;
-  queuedTackle = false;
+  queuedActs[0].kick = queuedActs[0].tackle = false;
+  queuedActs[1].kick = queuedActs[1].tackle = false;
 }
 
 /* ==================== Interpolación (delay adaptativo, v1.2) ==================== */
 // Pelota y RIVALES se renderizan interpDelay ms en el pasado interpolando entre
-// snapshots (50–160 ms según snapInterval + jitter). El PROPIO jugador NO: su
-// pose sale de la predicción (pred + corr), siempre fresca.
+// snapshots (50–160 ms según snapInterval + jitter). Los cuerpos PROPIOS no:
+// su pose sale de la predicción (pred + corr por cuerpo), siempre fresca.
 function sampleState() {
   if (!snaps.length) return null;
   const rt = performance.now() - interpDelay;
@@ -2850,16 +3478,19 @@ function sampleState() {
     });
   }
 
-  // El RENDER del PROPIO jugador usa SIEMPRE la predicción (SPEC A): posición
-  // pred + offset de corrección y facing local (respuesta inmediata al input).
-  const self = players.get(myId);
-  if (self && pred) {
-    self.x = pred.x + corrX;
-    self.y = pred.y + corrY;
-    self.fx = pred.fx;
-    self.fy = pred.fy;
-    self.stun = pred.stun;
-    self.slide = pred.slide;
+  // El RENDER de los cuerpos PROPIOS usa SIEMPRE la predicción (SPEC A, v1.3
+  // ×N): posición pred + offset de corrección y facing local (respuesta
+  // inmediata al input de cada cuerpo).
+  for (const sb of selfPred) {
+    if (!sb.pred) continue;
+    const self = players.get(sb.id);
+    if (!self) continue;
+    self.x = sb.pred.x + sb.corrX;
+    self.y = sb.pred.y + sb.corrY;
+    self.fx = sb.pred.fx;
+    self.fy = sb.pred.fy;
+    self.stun = sb.pred.stun;
+    self.slide = sb.pred.slide;
   }
 
   return {
@@ -3283,6 +3914,8 @@ function drawPlayers(st, now) {
     const p = st.players.get(pl.id);
     if (!p) continue;
     const stunned = p.stun > 0.01;
+    // v1.3: "mío" = cualquier cuerpo cuyo owner sea mi usuario (en duo, 2).
+    const mine = pl.owner === myId || pl.id === myId;
 
     ctx.save();
     ctx.translate(p.x, p.y);
@@ -3296,9 +3929,10 @@ function drawPlayers(st, now) {
     // Botines debajo del cuerpo (etapa 2 los dibuja de verdad).
     drawPlayerFeet(p, pl, now);
 
-    // Halo distintivo del propio jugador.
-    if (pl.id === myId) {
-      ctx.strokeStyle = "rgba(245,197,66,0.9)";
+    // Halo distintivo de los cuerpos propios (v1.3, SPEC C): A (slot 0) dorado
+    // como en v1.1; B (slot 1) plateado/celeste.
+    if (mine) {
+      ctx.strokeStyle = pl.slot === 1 ? "rgba(178,212,255,0.92)" : "rgba(245,197,66,0.9)";
       ctx.lineWidth = 2.4;
       ctx.setLineDash([6, 5]);
       ctx.beginPath();
@@ -3353,18 +3987,29 @@ function drawPlayers(st, now) {
     }
     ctx.restore();
 
-    // Bandera arriba y nombre abajo (sin rotación de stun).
+    // Bandera arriba y nombre abajo (sin rotación de stun). v1.3 (SPEC C): el
+    // cuerpo B (slot 1) lleva la marca "②" junto al nombre — y aunque los
+    // nombres estén apagados, el "②" solo se mantiene para distinguirlo.
     ctx.save();
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.font = "13px system-ui, sans-serif";
     ctx.fillText(pl.flag, p.x, p.y - PLAYER_R - 13);
-    if (settings.names) {
+    const label = settings.names
+      ? pl.name + (pl.slot === 1 ? " ②" : "")
+      : pl.slot === 1
+        ? "②"
+        : "";
+    if (label) {
       ctx.font = "700 11px system-ui, sans-serif";
       ctx.shadowColor = "rgba(0,0,0,0.75)";
       ctx.shadowBlur = 4;
-      ctx.fillStyle = pl.id === myId ? "#ffdf7e" : "rgba(255,255,255,0.88)";
-      ctx.fillText(pl.name, p.x, p.y + PLAYER_R + 13);
+      ctx.fillStyle = mine
+        ? pl.slot === 1
+          ? "#cfe2ff"
+          : "#ffdf7e"
+        : "rgba(255,255,255,0.88)";
+      ctx.fillText(label, p.x, p.y + PLAYER_R + 13);
     }
     ctx.restore();
   }
@@ -3622,7 +4267,8 @@ function frame(now) {
   if (theme.snow) updateSnow(dt, now);
 
   // Feedback de cooldown de barrida (la de patada llega en el estado: kc).
-  if (btnTackle) btnTackle.classList.toggle("cooldown", performance.now() < tackleCdUntil);
+  // El botón siempre refleja el cuerpo A (en duo está oculto, SPEC C).
+  if (btnTackle) btnTackle.classList.toggle("cooldown", performance.now() < tackleCdUntil[0]);
 }
 
 /* ================================ Inicialización ================================ */
@@ -3640,6 +4286,24 @@ buildCountryGrid();
 // Default de visibilidad: privada (SPEC) — por si el HTML no marca ninguno.
 if (visPrivate && visPublic && !visPrivate.checked && !visPublic.checked) {
   visPrivate.checked = true;
+}
+
+// v1.3: opción "duo" en #mode-select si el HTML aún no la trae (el host la
+// necesita para elegir el modo; idempotente si el HTML ya la incluye).
+if (modeSelect) {
+  let hasDuo = false;
+  for (let i = 0; i < modeSelect.options.length; i++) {
+    if (modeSelect.options[i].value === "duo") {
+      hasDuo = true;
+      break;
+    }
+  }
+  if (!hasDuo) {
+    const opt = document.createElement("option");
+    opt.value = "duo";
+    opt.textContent = "👥 Dúo (2 cuerpos c/u)";
+    modeSelect.appendChild(opt);
+  }
 }
 
 if (joystickEl) joystickEl.style.visibility = "hidden"; // solo aparece bajo el dedo

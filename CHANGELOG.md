@@ -4,6 +4,33 @@ Todos los cambios notables de PoliGol se documentan acá.
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es/) y el proyecto usa
 versionado semántico.
 
+## [1.3.0] — 2026-06-12
+
+Modo Dúo y partidos configurables.
+
+### Agregado
+- **Modo Dúo 🎮**: cada usuario controla **2 jugadores** a la vez. En el celular,
+  la pantalla se parte en dos zonas con un joystick dinámico cada una (izquierda =
+  jugador A, derecha = B): mantenés y arrastrás para moverte, **tap corto para
+  patear** (soltás y tocás de nuevo = patada) y doble tap para la barrida. En
+  teclado: WASD + F/G para A, flechas + L/K para B (con cartel de ayuda al entrar).
+  De 2 a 4 usuarios (hasta 8 jugadores en cancha); cada usuario defiende su arco.
+  Tu jugador A lleva halo dorado y el B halo celeste con "②".
+- **Partido a goles o por tiempo** (lo configura el dueño de la sala, junto al modo
+  y el estadio): a 1/3/5/10 goles, o 2/3/5/10 minutos con **reloj en pantalla**
+  que corre solo con la pelota en juego. Si el tiempo termina empatado: **GOL DE
+  ORO** — el próximo gol gana, con el reloj pulsando en dorado.
+- La lista de salas públicas y el lobby muestran el objetivo del partido
+  ("a 5 goles" / "3 min").
+- La predicción local de v1.2 ahora corre para los dos cuerpos propios en Dúo, y
+  el feedback de patada/barrida es por cuerpo.
+- `/metrics` reporta también `bodies` (jugadores físicos en cancha).
+- `tools/loadtest.js --duo` para cargar el server con salas en modo Dúo.
+
+### Corregido
+- `KICK_COOLDOWN` no estaba definido en el cliente (error latente de v1.2 al
+  patear con la pelota en rango).
+
 ## [1.2.0] — 2026-06-12
 
 La actualización de la jugabilidad y la escala.

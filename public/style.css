@@ -1789,6 +1789,21 @@ body.in-game .gear-btn-global {
     0 6px 18px rgba(0, 0, 0, 0.4);
 }
 
+/* v1.3: en duo puede haber 3 o 4 equipos-usuario (pills .team-2 / .team-3). */
+.team-pill.team-2 {
+  border-color: rgba(94, 215, 130, 0.6);
+  box-shadow:
+    0 0 14px rgba(94, 215, 130, 0.25),
+    0 6px 18px rgba(0, 0, 0, 0.4);
+}
+
+.team-pill.team-3 {
+  border-color: rgba(245, 197, 66, 0.6);
+  box-shadow:
+    0 0 14px rgba(245, 197, 66, 0.25),
+    0 6px 18px rgba(0, 0, 0, 0.4);
+}
+
 /* ============================================================
    MODAL DE OPCIONES (glassmorphism)
    ============================================================ */
@@ -2456,5 +2471,237 @@ body.in-game .gear-btn-global {
 @media (orientation: landscape) and (max-height: 480px) and (pointer: coarse) {
   .ping-indicator {
     bottom: calc(86px + env(safe-area-inset-bottom, 0px)); /* kick: bottom 14 + 64 */
+  }
+}
+
+/* ============================================================
+   ============================================================
+   v1.3 — Modo DÚO + objetivo de partido (reloj / gol de oro)
+   ============================================================
+   ============================================================ */
+
+/* ---------- Lobby: fila "Partido a" (#match-target-select + #match-value-select) ----------
+   Ocupa el ancho completo de .lobby-config (fila propia bajo modo/estadio). */
+.config-field-match {
+  grid-column: 1 / -1;
+}
+
+.match-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+/* ---------- Chip de objetivo de partido en las room-cards ----------
+   Variante de .room-chip: "a 3 goles" / "5 min". */
+.room-chip-match {
+  color: #9ec8ff;
+  background: rgba(93, 160, 255, 0.12);
+  border-color: rgba(93, 160, 255, 0.32);
+}
+
+/* ---------- Reloj de partido (#match-clock) ----------
+   Visible solo con target=time (client.js togglea .hidden y setea "m:ss").
+   Arriba al centro, debajo del scoreboard. En gol de oro client.js agrega
+   .golden y pone el texto "GOL DE ORO". */
+.match-clock {
+  position: absolute;
+  top: calc(56px + env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10; /* mismo plano que el scoreboard */
+  padding: 3px 15px;
+  border-radius: 999px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 1.04rem;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  color: var(--ink);
+  background: rgba(10, 15, 30, 0.62);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  pointer-events: none; /* nunca roba toques (zona B táctil en duo pasa por acá) */
+  user-select: none;
+  -webkit-user-select: none;
+  white-space: nowrap;
+  animation: drop-in 0.35s var(--ease) backwards;
+}
+
+/* Estado GOL DE ORO: dorado con pulso */
+.match-clock.golden {
+  color: var(--gold-2);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border-color: rgba(245, 197, 66, 0.7);
+  background: rgba(38, 31, 8, 0.72);
+  text-shadow: 0 0 18px rgba(245, 197, 66, 0.65);
+  animation: golden-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes golden-pulse {
+  0%, 100% {
+    transform: translateX(-50%) scale(1);
+    box-shadow:
+      0 0 10px rgba(245, 197, 66, 0.35),
+      0 6px 18px rgba(0, 0, 0, 0.4);
+  }
+  50% {
+    transform: translateX(-50%) scale(1.07);
+    box-shadow:
+      0 0 30px rgba(245, 197, 66, 0.8),
+      0 6px 18px rgba(0, 0, 0, 0.4);
+  }
+}
+
+/* ---------- Acento del CUERPO B (halo "②" plateado/celeste) ----------
+   Aplicable a cualquier etiqueta HUD que refiera al cuerpo B propio. */
+.body-b {
+  color: #bfe3ff;
+  text-shadow: 0 0 12px rgba(125, 200, 255, 0.6);
+}
+
+/* ---------- Hint de teclas en duo (#duo-keys-hint) ----------
+   Arranca .hidden. Al quitarle .hidden client.js, la animación CSS hace
+   fade-in → 3 s visible → fade-out solo (forwards deja opacity 0). */
+.duo-keys-hint {
+  position: absolute;
+  inset: 0;
+  z-index: 40; /* sobre overlay (20) y endgame (30), bajo engranaje (60) */
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  pointer-events: none; /* jamás bloquea input */
+  animation: duo-hint 3.4s var(--ease) forwards;
+}
+
+@keyframes duo-hint {
+  0% { opacity: 0; transform: scale(0.92); }
+  9% { opacity: 1; transform: scale(1); }
+  82% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(0.97); }
+}
+
+.duo-keys-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: clamp(16px, 3.5vw, 26px) clamp(20px, 5vw, 38px);
+  border-radius: var(--radius-lg);
+  background: rgba(10, 15, 30, 0.78);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.duo-keys-title {
+  font-size: clamp(0.95rem, 3vw, 1.15rem);
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.6);
+}
+
+.duo-keys-cols {
+  display: flex;
+  align-items: stretch;
+  gap: clamp(14px, 4vw, 28px);
+}
+
+.duo-keys-divider {
+  width: 1px;
+  align-self: stretch;
+  background: linear-gradient(180deg, transparent, var(--glass-border), transparent);
+}
+
+.duo-keys-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: center;
+}
+
+.duo-keys-body {
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--gold-2); /* cuerpo A dorado; la col B lleva además .body-b (celeste) */
+}
+
+.duo-keys-body.body-b {
+  color: #bfe3ff;
+  text-shadow: 0 0 12px rgba(125, 200, 255, 0.6);
+}
+
+.duo-keys-map {
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+
+.duo-keys-hint kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.9em;
+  padding: 0.16em 0.42em;
+  margin: 0 2px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.84em;
+  font-weight: 800;
+  line-height: 1.2;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-bottom-width: 3px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+
+/* ---------- Táctil DUO: dos zonas (mitad izq = cuerpo A, mitad der = cuerpo B) ----------
+   client.js agrega .duo-mode a #touch-controls (o a #screen-game) durante un
+   partido duo en táctil: los botones ⚽/🦵 se ocultan (tap/doble-tap los
+   reemplaza). El #rotate-overlay (z 90) y el scoreboard/#match-clock
+   (pointer-events: none) no interfieren con las zonas. */
+@media (pointer: coarse) {
+  .touch-controls.duo-mode .touch-buttons,
+  #screen-game.duo-mode .touch-buttons {
+    display: none !important;
+  }
+
+  /* Joystick dinámico de la zona B: acento plateado/celeste (cuerpo B).
+     Mismo comportamiento que .touch-joystick; solo cambia el acento. */
+  .touch-joystick.joystick-b {
+    border-color: rgba(125, 200, 255, 0.45);
+  }
+
+  .touch-joystick.joystick-b.active {
+    border-color: rgba(125, 200, 255, 0.75);
+    box-shadow:
+      inset 0 0 26px rgba(0, 0, 0, 0.45),
+      0 0 22px rgba(125, 200, 255, 0.4),
+      0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+}
+
+/* ---------- Responsive v1.3 (landscape bajo = partido móvil) ---------- */
+@media (orientation: landscape) and (max-height: 480px) {
+  .match-clock {
+    top: calc(38px + env(safe-area-inset-top, 0px));
+    padding: 2px 11px;
+    font-size: 0.82rem;
+  }
+
+  .duo-keys-card {
+    padding: 12px 20px;
+    gap: 9px;
+  }
+
+  .duo-keys-map {
+    font-size: 0.78rem;
   }
 }
