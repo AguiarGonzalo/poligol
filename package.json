@@ -1,6 +1,6 @@
 {
   "name": "poligol",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Juego web de fútbol multijugador en tiempo real con canchas poligonales y un arco por jugador.",
   "main": "server.js",
   "scripts": {

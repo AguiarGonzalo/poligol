@@ -2330,6 +2330,115 @@ body.in-game .gear-btn-global {
   color: var(--ink-faint);
 }
 
+/* ---------- Modo entrenamiento (v1.5) ----------
+   Botón del home (#btn-train) + HUD dentro de #screen-game (#training-hud). */
+#btn-train {
+  font-weight: 800;
+  letter-spacing: 0.2px;
+}
+
+.training-hud {
+  position: absolute;
+  top: calc(10px + env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 26;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  width: min(92vw, 540px);
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
+}
+.training-hud.hidden { display: none; }
+
+.training-hud .th-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.training-hud .th-title {
+  font-weight: 800;
+  color: var(--gold-2);
+}
+.training-hud .th-stat {
+  color: var(--ink-dim);
+  font-weight: 600;
+}
+.training-hud .th-stat b {
+  color: var(--ink);
+  font-size: 1.25rem;
+  margin-left: 4px;
+}
+.training-hud .th-controls {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+.training-hud .th-label {
+  color: var(--ink-faint);
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.training-hud .th-seg {
+  display: inline-flex;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.training-hud .th-def {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink-dim);
+  font-weight: 800;
+  padding: 6px 13px;
+  cursor: pointer;
+  transition: background-color var(--speed) var(--ease), color var(--speed) var(--ease);
+}
+.training-hud .th-def:hover { background: var(--glass-bg); color: var(--ink); }
+.training-hud .th-def.active {
+  background: var(--gold);
+  color: #1a1304;
+}
+.training-hud .th-btn {
+  padding: 6px 14px;
+  font-size: 0.9rem;
+}
+.training-hud .th-hint {
+  margin: 0;
+  color: var(--ink-faint);
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+.training-hud kbd {
+  font: inherit;
+  font-size: 0.72rem;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--glass-border);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+
+/* En landscape bajo (móvil acostado) el HUD se compacta y oculta la ayuda. */
+@media (max-height: 460px) {
+  .training-hud {
+    top: 6px;
+    padding: 8px 12px;
+    gap: 6px;
+    width: min(96vw, 560px);
+  }
+  .training-hud .th-hint { display: none; }
+  .training-hud .th-def { padding: 5px 11px; }
+}
+
 /* ---------- Indicador de ping (#ping-indicator, dentro de #screen-game) ----------
    client.js setea el texto ("XX ms") y togglea UNA de .ping-good/.ping-mid/.ping-bad.
    El puntito de color lo dibuja CSS (::before): NO insertar un span propio. */

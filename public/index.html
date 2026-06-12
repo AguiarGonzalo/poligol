@@ -67,6 +67,10 @@
                      aria-label="Código de sala (4 letras)">
               <button id="btn-join" class="btn btn-secondary" type="button">Unirse</button>
             </div>
+
+            <div class="divider" aria-hidden="true"><span>o practicá</span></div>
+
+            <button id="btn-train" class="btn btn-ghost btn-block" type="button">🎯 Entrenar solo</button>
           </div>
         </div>
 
@@ -177,6 +181,25 @@
       <canvas id="game-canvas"></canvas>
 
       <div id="scoreboard" class="scoreboard" aria-live="polite"></div>
+
+      <!-- HUD de entrenamiento (modo solo, client-side): visible solo en Entrenar -->
+      <div id="training-hud" class="training-hud hidden">
+        <div class="th-row">
+          <span class="th-title">🎯 Entrenamiento</span>
+          <span class="th-stat">Goles <b id="th-goals">0</b></span>
+        </div>
+        <div class="th-row th-controls">
+          <span class="th-label">Rivales</span>
+          <div class="th-seg" role="group" aria-label="Rivales">
+            <button class="th-def" data-def="0" type="button">0</button>
+            <button class="th-def" data-def="1" type="button">1</button>
+            <button class="th-def" data-def="2" type="button">2</button>
+          </div>
+          <button id="btn-train-reset" class="btn btn-ghost th-btn" type="button" title="Reiniciar la pelota (R)">↺ Pelota</button>
+          <button id="btn-train-exit" class="btn btn-ghost th-btn" type="button">Salir</button>
+        </div>
+        <p class="th-hint">Mantené <kbd>Espacio</kbd>/⚽ para patear · apuntás moviendo el cuerpo · <kbd>R</kbd> reinicia la pelota</p>
+      </div>
 
       <div id="match-clock" class="match-clock hidden" aria-live="off"></div>
 

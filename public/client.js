@@ -521,6 +521,11 @@ const queuedTackle = [false, false];
 let baseState = null;      // { bodies:[...], ball:{...}, rules:{tackles} } o null
 let baseArena = null;      // salida de PoliPhysics.buildArena(n, stadium)
 let extWorld = null;       // último mundo extrapolado renderizado (clon de baseState)
+// v1.5 — Modo entrenamiento (solo, 100% client-side): corre el MISMO physics-core
+// localmente a 60 Hz (sin servidor, sin latencia). Cuando training != null, el
+// pipeline de render/input se alimenta de su estado local en vez de la red.
+let training = null;       // { state, accMs, lastNs, goals, defenders, stadium, ... } o null
+let trainingCfg = { defenders: 0, stadium: "clasico" };
 // Offset de corrección por disco (id → {dx,dy}); render = extrapolado + offset, el
 // offset decae a 0 en ~120 ms (anti-snap). La pelota usa la clave "__ball__".
 const dragOffset = new Map();
@@ -635,6 +640,9 @@ function connectWs() {
     const hadJoinIntent = wsQueue.some((i) => i.type === "create" || i.type === "join");
     // Nunca dejar mensajes viejos encolados para una conexión futura.
     wsQueue = [];
+    // v1.5: el entrenamiento es 100% local; una caída de la conexión de salas NO
+    // debe sacarte del modo solo. Se ignora (la reconexión se hará al volver al home).
+    if (training) return;
     if (phase !== "home") {
       toast("Se perdió la conexión con el servidor");
       goHome(false);
@@ -806,6 +814,13 @@ function showScreen(name) {
 function goHome(sendLeave) {
   if (sendLeave && ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "leave" }));
+  }
+  // v1.5: salir del entrenamiento (modo local) limpia su estado y restaura el HUD.
+  if (training) {
+    training = null;
+    const hud = $("training-hud");
+    if (hud) hud.classList.add("hidden");
+    if (scoreboardEl) scoreboardEl.classList.remove("hidden");
   }
   stopInputLoop();
   clearOverlayTimers();
@@ -2305,6 +2320,7 @@ function releaseAllKick(slot) {
  * - duo: UN solo mensaje — campos planos = cuerpo A (slot 0), objeto `b` = cuerpo
  *   B (slot 1), un solo seq. En no-duo no se manda `b`. */
 function flushInput(force) {
+  if (training) return; // v1.5: el entrenamiento es local, no envía input a la red
   if (phase !== "game" || ended || !ws || ws.readyState !== WebSocket.OPEN) return;
   const duo = isDuo();
   const a = currentInputFor(0);
@@ -2450,6 +2466,12 @@ const KICK_CODE = "__kick__"; // fuente de kick mantenido por teclado
 
 window.addEventListener("keydown", (e) => {
   if (phase !== "game") return;
+  // v1.5: R reinicia la pelota en entrenamiento.
+  if (training && (e.code === "KeyR")) {
+    e.preventDefault();
+    resetTrainingBall(true);
+    return;
+  }
   if (MOVE_CODES.has(e.code)) {
     keysDown.add(e.code);
     e.preventDefault();
@@ -3641,6 +3663,7 @@ function updatePrediction(dt) {
  * ext=0: "ver el pasado interpolado" (suave, con delay) — interpola el buffer de
  *        snapshots como v1.2/v1.3. El usuario lo elige con #opt-extrapolation = 0. */
 function sampleState() {
+  if (training) return sampleTrainingState(); // v1.5: estado local autoritativo
   const ext = extTicks();
   if (ext > 0 && baseState && PHYS) return sampleExtrapolated(ext);
   return sampleInterpolated();
@@ -4500,6 +4523,9 @@ function frame(now) {
   lastFrameT = now;
   if (phase !== "game" || !match) return;
 
+  // v1.5: en entrenamiento, avanzar la simulación local (60 Hz) antes de render.
+  if (training) stepTraining(now);
+
   // v1.4 H: decae el offset de reconciliación por disco + flush de inputs
   // pospuestos por el cap de 60/s. La extrapolación de mundo se hace en
   // sampleState() (cada frame, sobre el estado base fresco) para 0 delay.
@@ -4559,8 +4585,352 @@ function frame(now) {
   if (btnKick) btnKick.classList.toggle("kick-armed", kickHeldFor(0));
 }
 
+/* ============================ Modo entrenamiento (v1.5) ============================
+ * Modo "solo" 100% client-side: corre el MISMO physics-core localmente a 60 Hz, sin
+ * servidor ni latencia (instantáneo, hasta offline). Reusa el pipeline de render
+ * (drawField/drawGoals/drawPosts/drawPlayers/drawBall vía sampleState) y de input
+ * (currentInputFor/kickHeldFor/queuedTackle). Cancha rectangular (n=2): tu jugador a
+ * la izquierda ataca el arco derecho; 0–2 rivales con IA simple lo defienden. */
+
+const TRAIN_BOT_COUNTRIES = ["BR", "DE", "FR"];
+
+function startTraining() {
+  if (!PHYS) {
+    toast("El motor de física aún no cargó, probá de nuevo");
+    return;
+  }
+  if (training) return;
+  const prof = loadProfile();
+  const country = selectedCountry || (prof && prof.country) || "AR";
+  const name = (nameInput.value.trim() || (prof && prof.name) || "Vos").slice(0, 16);
+  myId = "me";
+  buildTrainingMatch(name, country, trainingCfg.defenders, trainingCfg.stadium);
+  training = {
+    state: buildTrainingState(),
+    accMs: 0,
+    lastNs: null,
+    goals: 0,
+    paused: false,
+    resetAt: 0,
+    defenders: trainingCfg.defenders,
+    stadium: trainingCfg.stadium,
+  };
+  // Buffers de red/extrapolación: no se usan en entrenamiento.
+  baseState = null;
+  extWorld = null;
+  dragOffset.clear();
+  snaps = [];
+  resetPrediction();
+  ringFx = [];
+  ballTrail = [];
+  confetti = [];
+  confettiRainUntil = 0;
+  ballSpin = 0;
+  feetState.clear();
+  dustFx = [];
+  shakeUntil = 0;
+  ended = false;
+  queuedTackle[0] = false;
+  queuedTackle[1] = false;
+  kickHoldSources[0].clear();
+  kickHoldSources[1].clear();
+  if (scoreboardEl) scoreboardEl.classList.add("hidden");
+  const hud = $("training-hud");
+  if (hud) hud.classList.remove("hidden");
+  syncTrainingHud();
+  updateTrainingGoals();
+  phase = "game";
+  showScreen("game");
+  enterGameDisplay();
+  startInputLoop(); // inocuo: flushInput corta en entrenamiento
+  updateTouchButtonsVisibility(false); // ⚽/🦵 visibles (no-duo)
+  hideMatchClock();
+  hideDuoKeysHint();
+  clearOverlayTimers();
+  overlayEl.textContent = "";
+  const d = document.createElement("div");
+  d.className = "overlay-text";
+  d.textContent = "¡A ENTRENAR!";
+  overlayEl.appendChild(d);
+  overlayTimers.push(
+    setTimeout(() => {
+      overlayEl.textContent = "";
+    }, 900)
+  );
+}
+
+// Objeto `match` para que el render funcione (bounds/arena/goals/posts/players/byId/
+// teams). Jugador = team 0 (izquierda), rivales = team 1 (derecha).
+function buildTrainingMatch(name, country, defenders, stadium) {
+  const n = 2;
+  baseArena = PHYS.buildArena(n, stadium);
+  const verts = polygonVerts(n);
+  const bounds = vertsBounds(verts);
+  const meInfo = countryInfo(country);
+  const players = [
+    {
+      id: "me", name: name, country: country, team: 0, owner: "me", slot: 0,
+      c1: meInfo.c1, c2: meInfo.c2, flag: flagOf(country),
+    },
+  ];
+  for (let i = 0; i < defenders; i++) {
+    const bc = TRAIN_BOT_COUNTRIES[i % TRAIN_BOT_COUNTRIES.length];
+    const bi = countryInfo(bc);
+    players.push({
+      id: "bot" + i, name: "Coco " + (i + 1), country: bc, team: 1, owner: "bot" + i,
+      slot: 0, c1: bi.c1, c2: bi.c2, flag: flagOf(bc),
+    });
+  }
+  const byId = new Map(players.map((p) => [p.id, p]));
+  const mkTeam = (idx, members) => ({
+    index: idx, members: members, users: members,
+    c1: members[0] ? members[0].c1 : "#9fb0c8",
+    c2: members[0] ? members[0].c2 : "#ffffff",
+    flags: members.map((m) => m.flag).join(""),
+  });
+  match = {
+    mode: "training", stadium: stadium, n: n, players: players, byId: byId,
+    teams: [mkTeam(0, [players[0]]), mkTeam(1, players.slice(1))],
+    myTeam: 0, myBodyIds: new Set(["me"]),
+    ownerNames: new Map([["me", name]]),
+    target: "goals", value: 0, golden: false, tackles: true,
+    arena: baseArena, goals: baseArena.goals, posts: baseArena.posts,
+    verts: verts, bounds: bounds, fieldPath: buildFieldPath(verts),
+  };
+}
+
+// Estado físico local autoritativo (cuerpos + pelota) en posiciones de saque.
+function buildTrainingState() {
+  const bodies = [];
+  for (const pl of match.players) {
+    const sp = trainingSpawn(pl);
+    bodies.push(
+      PHYS.makeBody({
+        id: pl.id, team: pl.team, slot: pl.slot, owner: pl.owner,
+        x: sp.x, y: sp.y, fx: sp.fx, fy: sp.fy,
+      })
+    );
+  }
+  return { bodies: bodies, ball: PHYS.makeBall(), rules: { tackles: true } };
+}
+
+// Saque: jugador a la izquierda mirando al arco derecho; rivales cerca del arco
+// derecho (el que el jugador ataca), repartidos en y si son 2.
+function trainingSpawn(pl) {
+  if (pl.id === "me") return { x: -RECT_W * 0.5, y: 0, fx: 1, fy: 0 };
+  const bots = match.players.filter((p) => p.id !== "me");
+  const idx = bots.indexOf(pl);
+  const y = bots.length <= 1 ? 0 : idx === 0 ? -70 : 70;
+  return { x: RECT_W * 0.55, y: y, fx: -1, fy: 0 };
+}
+
+// Avance por frame con paso fijo de 60 Hz (acumulador de tiempo real).
+function stepTraining(now) {
+  const t = training;
+  if (t.lastNs == null) {
+    t.lastNs = now;
+    return;
+  }
+  let dtMs = now - t.lastNs;
+  t.lastNs = now;
+  if (dtMs > 250) dtMs = 250; // clamp al volver de una pestaña en 2º plano
+  t.accMs += dtMs;
+  const TS = 1000 / 60;
+  let steps = 0;
+  while (t.accMs >= TS && steps < 6) {
+    trainingTick();
+    t.accMs -= TS;
+    steps++;
+  }
+  if (steps === 6) t.accMs = 0;
+}
+
+function trainingTick() {
+  const t = training;
+  if (t.paused) {
+    if (performance.now() >= t.resetAt) {
+      doTrainingResetBall();
+      t.paused = false;
+    }
+    return; // física congelada durante el festejo del gol
+  }
+  const inputs = {};
+  const mv = currentInputFor(0);
+  inputs.me = { mx: mv.mx, my: mv.my, kick: kickHeldFor(0), tackle: queuedTackle[0] };
+  queuedTackle[0] = false; // consumir el edge de barrida (no pasa por flushInput)
+  for (const b of t.state.bodies) {
+    if (b.owner !== "me") inputs[b.id] = aiInput(b);
+  }
+  const evs = PHYS.stepWorld(t.state, inputs, match.arena, match.arena.phys, t.state.rules);
+  if (evs) {
+    for (const e of evs) {
+      if (e.type === "kicked" && e.id === "me") trainingKickRing();
+    }
+  }
+  if (PHYS.goalCheck(t.state.ball, match.arena) >= 0) onTrainingGoal();
+}
+
+// IA simple del rival: se interpone entre la pelota y su arco (derecha) y despeja
+// al contacto. Beatable pero presente. Usa la MISMA física que el jugador.
+function aiInput(bot) {
+  const ball = training.state.ball;
+  const goalX = RECT_W; // arco propio de los rivales (derecha)
+  const db = Math.hypot(ball.x - bot.x, ball.y - bot.y);
+  // Desafiar la pelota SOLO si está cerca Y en su mitad/centro (no se va a perseguir
+  // hasta el área del atacante): ir directo y despejar al contacto.
+  if (ball.x > -40 && db < 60) {
+    const mx = ball.x - bot.x;
+    const my = ball.y - bot.y;
+    const l = Math.hypot(mx, my) || 1;
+    return { mx: mx / l, my: my / l, kick: db < 32, tackle: false };
+  }
+  // Si no, mantener posición GOAL-SIDE: a 90u de la pelota HACIA el arco propio
+  // (queda entre la pelota y su arco), sin cruzar mucho a la mitad rival.
+  let vx = goalX - ball.x;
+  let vy = 0 - ball.y;
+  const gl = Math.hypot(vx, vy) || 1;
+  let tx = ball.x + (vx / gl) * 90;
+  const ty = ball.y + (vy / gl) * 90;
+  if (tx < -30) tx = -30; // no perseguir hacia la mitad del atacante
+  const mx = tx - bot.x;
+  const my = ty - bot.y;
+  const ml = Math.hypot(mx, my) || 1;
+  if (ml < 9) return { mx: 0, my: 0, kick: false, tackle: false };
+  return { mx: mx / ml, my: my / ml, kick: false, tackle: false };
+}
+
+function trainingKickRing() {
+  const me = training.state.bodies.find((b) => b.id === "me");
+  if (!me) return;
+  ringFx.push({ x: me.x, y: me.y, t: performance.now() });
+  lastKickT = performance.now();
+}
+
+function onTrainingGoal() {
+  const t = training;
+  t.goals++;
+  updateTrainingGoals();
+  t.paused = true;
+  t.resetAt = performance.now() + 1100;
+  clearOverlayTimers();
+  overlayEl.textContent = "";
+  const me = match.byId.get("me");
+  const goalText = document.createElement("div");
+  goalText.className = "goal-text";
+  goalText.textContent = "¡GOL!";
+  goalText.style.color = me.c1;
+  overlayEl.appendChild(goalText);
+  overlayTimers.push(
+    setTimeout(() => {
+      overlayEl.textContent = "";
+    }, 1000)
+  );
+  sfxGoal();
+  shakeUntil = performance.now() + 200;
+  confettiBurst([me.c1, me.c2]);
+  commentator("goal", { name: match.ownerNames.get("me") || "Vos" });
+}
+
+// Reset de la pelota al centro + jugadores al saque (post-gol o manual con R).
+function doTrainingResetBall() {
+  const ball = training.state.ball;
+  ball.x = 0;
+  ball.y = 0;
+  ball.vx = 0;
+  ball.vy = 0;
+  ball.lastTouch = null;
+  for (const b of training.state.bodies) {
+    const pl = match.byId.get(b.id);
+    const sp = trainingSpawn(pl);
+    b.x = sp.x;
+    b.y = sp.y;
+    b.vx = 0;
+    b.vy = 0;
+    b.fx = sp.fx;
+    b.fy = sp.fy;
+    b.kickCd = 0;
+    b.kickArmed = true;
+    b.stun = 0;
+    b.slide = 0;
+  }
+  ballTrail.length = 0;
+}
+
+function resetTrainingBall(manual) {
+  if (!training) return;
+  training.paused = false;
+  doTrainingResetBall();
+}
+
+// Estado a renderizar (sampleState lo devuelve cuando training != null): el estado
+// local ES autoritativo y sin latencia, así que se dibuja directo.
+function sampleTrainingState() {
+  const t = training;
+  if (!t) return null;
+  const players = new Map();
+  for (const b of t.state.bodies) {
+    players.set(b.id, {
+      x: b.x, y: b.y, fx: b.fx, fy: b.fy,
+      stun: b.stun, kc: b.kickCd, slide: b.slide,
+      ka: b.kickArmed, kh: b.kickHeld,
+    });
+  }
+  return {
+    ball: { x: t.state.ball.x, y: t.state.ball.y, vx: t.state.ball.vx, vy: t.state.ball.vy },
+    players: players,
+    paused: t.paused,
+  };
+}
+
+function setTrainingDefenders(n) {
+  trainingCfg.defenders = Math.max(0, Math.min(2, n | 0));
+  syncTrainingHud();
+  if (!training) return;
+  // Rearmar cancha/estado con la nueva cantidad de rivales, conservando los goles.
+  const goals = training.goals;
+  const meBody = match.byId.get("me");
+  const name = match.ownerNames.get("me") || "Vos";
+  const country = meBody ? meBody.country : "AR";
+  buildTrainingMatch(name, country, trainingCfg.defenders, training.stadium);
+  training.state = buildTrainingState();
+  training.defenders = trainingCfg.defenders;
+  training.paused = false;
+  training.goals = goals;
+  ringFx = [];
+  ballTrail = [];
+  feetState.clear();
+  updateTrainingGoals();
+}
+
+function updateTrainingGoals() {
+  const el = $("th-goals");
+  if (el) el.textContent = String(training ? training.goals : 0);
+}
+
+function syncTrainingHud() {
+  const hud = $("training-hud");
+  if (!hud) return;
+  for (const b of hud.querySelectorAll(".th-def")) {
+    b.classList.toggle("active", +b.dataset.def === trainingCfg.defenders);
+  }
+}
+
 /* ================================ Inicialización ================================ */
 buildCountryGrid();
+
+// v1.5: wiring del modo entrenamiento (botón del home + controles del HUD).
+on($("btn-train"), "click", startTraining);
+on($("btn-train-exit"), "click", () => goHome(false));
+on($("btn-train-reset"), "click", () => resetTrainingBall(true));
+{
+  const trainHud = $("training-hud");
+  if (trainHud) {
+    for (const b of trainHud.querySelectorAll(".th-def")) {
+      b.addEventListener("click", () => setTrainingDefenders(+b.dataset.def));
+    }
+  }
+  syncTrainingHud();
+}
 
 // Precargar perfil (nombre + país) desde localStorage "poligol.profile".
 {

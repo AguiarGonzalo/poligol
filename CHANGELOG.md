@@ -4,6 +4,24 @@ Todos los cambios notables de PoliGol se documentan acá.
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es/) y el proyecto usa
 versionado semántico.
 
+## [1.5.0] — 2026-06-12
+
+Modo Entrenamiento (jugar solo).
+
+### Agregado
+- **🎯 Entrenar solo**: botón en el inicio que te mete a una cancha al instante,
+  sin esperar a nadie. Perfecto para agarrarle la mano a la física de HaxBall
+  (el kick mantenido, la gambeta con el cuerpo, los rebotes en el palo).
+- Corre **100% en tu navegador** con el mismo motor de física del juego online:
+  arranca al toque, sin latencia y hasta sin conexión.
+- **Rivales con IA** opcionales (0, 1 o 2): defienden su arco posicionándose entre
+  la pelota y el palo, para practicar gambeta y definición bajo presión. Se
+  agregan/sacan en caliente desde el HUD.
+- **Contador de goles**, botón **↺ Pelota** y tecla **R** para reiniciar la pelota
+  al centro cuando quieras. Festejo de gol con cartel, sonido y confeti.
+- Funciona con teclado y en celular apaisado (mismo control que el online: mantené
+  para patear, apuntás moviendo el cuerpo).
+
 ## [1.4.0] — 2026-06-12
 
 Física estilo HaxBall. Reescritura completa del motor para que el juego se sienta

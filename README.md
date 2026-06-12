@@ -12,9 +12,9 @@ La gambeta es pura física, hay **postes** en los arcos, y las barridas son opci
 por sala. Detalle en el [CHANGELOG](CHANGELOG.md).
 
 **Modos y extras**: **1v1 / 2v2 / todos contra todos / Dúo** (2 jugadores por persona),
-partido a goles o por tiempo con gol de oro, salas **públicas** o privadas, sistema de
-**ready**, **4 estadios**, relator en español, invitación por **WhatsApp** y celular
-apaisado.
+**🎯 Entrenamiento solo** (con rivales-IA opcionales, sin esperar a nadie), partido a
+goles o por tiempo con gol de oro, salas **públicas** o privadas, sistema de **ready**,
+**4 estadios**, relator en español, invitación por **WhatsApp** y celular apaisado.
 
 ### Controles
 
