@@ -4,6 +4,56 @@ Todos los cambios notables de PoliGol se documentan acá.
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es/) y el proyecto usa
 versionado semántico.
 
+## [1.2.0] — 2026-06-12
+
+La actualización de la jugabilidad y la escala.
+
+### Arreglado
+- **"Imposible embocarle a la pelota"**: el dribble assist de v1.1 empujaba la pelota
+  en la dirección de tu carrera cuando eras el jugador más cercano — al correr hacia
+  una pelota libre, ¡el assist te la alejaba! Ahora el assist solo actúa cuando la
+  pelota ya está controlada (moviéndose con vos) y una pelota en reposo no recibe
+  fuerza hasta que la tocás de verdad.
+- **"No se ve la sala pública desde otra pestaña"**: la lista dependía de un polling
+  que se bloqueaba con la pestaña en segundo plano (incluso el botón refrescar).
+  Ahora el servidor **pushea** la lista a todos los que están en el inicio, al
+  instante y sin polling. El botón refrescar funciona siempre, y tu propia sala
+  aparece con el badge "Tu sala".
+- El loop de física corría a ~56 Hz reales por truncamiento del timer de Node;
+  ahora usa un acumulador de tiempo real y sostiene 60 Hz exactos (verificado:
+  30.02 snapshots/s).
+
+### Jugabilidad (netcode)
+- **Predicción local con reconciliación**: tu jugador responde al instante al
+  apretar (sin esperar el viaje al servidor); el servidor sigue siendo autoritativo
+  y las correcciones se suavizan en ~120 ms. Adiós al delay percibido.
+- Input enviado inmediatamente al cambiar (no más espera del tick de 30 Hz),
+  interpolación adaptativa según el jitter real de la conexión (50–160 ms en vez
+  de 100 fijos), y **kick buffer** de 160 ms: si apretás patear justo antes de
+  llegar a la pelota, la patada sale igual.
+- Feedback inmediato local de patada/barrida (sonido y animación al apretar).
+- Más respuesta: aceleración 1400→1600, frenado 6→7.5 (menos "patinada"),
+  rango de patada 36→44.
+- **Indicador de ping** en el partido (verde/amarillo/rojo).
+
+### Relator con voces reales (packs)
+- Si ponés audios en `public/voices/` con un `manifest.json` (instrucciones en
+  `public/voices/README.md`), el relator usa **audio real** — elegido al azar por
+  evento (gol, en contra, patada, racha, campeón) con fallback a la voz sintética.
+  No incluimos voces de PES/broadcasters por derechos de autor: el pack es tuyo
+  (grabate vos, o usá audio con licencia).
+
+### Escalabilidad — 1000 jugadores simultáneos verificados
+- Un solo loop global de 60 Hz para todas las salas, snapshots compactos (campos
+  en cero se omiten, 1 decimal), un solo stringify por sala, backpressure por
+  conexión (cliente lento no frena a los demás; zombi se desconecta), límites
+  anti-abuso (conexiones máximas, 1000 salas, rate limit por conexión).
+- `GET /health` y `GET /metrics` (salas, jugadores, tick promedio/p95, memoria).
+- **Load test reproducible** (`tools/loadtest.js`): 250 salas × 4 bots = 1000
+  conexiones jugando de verdad → tick p95 **3.95 ms** (presupuesto: 8), ~30k
+  msgs/s, RTT p95 5 ms, 0 errores, memoria estable. Detalle en `ARCHITECTURE.md`
+  (incluye el camino a escalar horizontal y qué plan de hosting hace falta).
+
 ## [1.1.0] — 2026-06-12
 
 La actualización del juego: modos de equipo, salas públicas y mucho jugo.

@@ -1,11 +1,21 @@
 /*
- * PoliGol — servidor autoritativo (v1.1).
+ * PoliGol — servidor autoritativo (v1.2).
  * Node.js (CommonJS): http estático (http + fs + path) + WebSocket ("ws") sobre el
  * mismo server. Salas públicas/privadas con código de 4 letras, lobby con modos
  * (ffa/1v1/2v2), estadios, readies con auto-arranque, partido por EQUIPOS con física
  * a 60 Hz (sub-steps de pelota, dribble assist, slide) y broadcast a 30 Hz, goles,
  * puntajes por equipo, rematch, desconexiones y heartbeat.
- * Implementa el contrato definido en SPEC.md (v1 + bloque v1.1) al pie de la letra.
+ * v1.2 (secciones A/B/C del SPEC): netcode con `seq` por input + `iq` por jugador en
+ * state (reconciliación), redondeo a 1 decimal de posiciones/velocidades, ping/pong
+ * de aplicación, KICK BUFFER de 160 ms, retune (ACCEL/FRICTION/KICK_RANGE), dribble
+ * assist arreglado (condición de pelota controlada) y suscripción `subRooms` con
+ * push coalesced de la lista de salas públicas.
+ * v1.2 (sección E — escalabilidad): snapshots compactos (stun/kc/slide ausentes si
+ * 0), backpressure por conexión (64 KB saltea snapshot / 512 KB cierra), UN interval
+ * global a 60 Hz para todas las salas en juego (un solo stringify por sala por
+ * broadcast), GET /health y /metrics (ventana móvil de 10 s), y límites anti-abuso
+ * (MAX_CONN, máx 1000 salas, rate limit de mensajes por conexión).
+ * Implementa el contrato definido en SPEC.md (v1 + v1.1 + v1.2) al pie de la letra.
  */
 
 "use strict";
@@ -26,16 +36,16 @@ const TICK = 1 / 60;        // física del server a 60 Hz
 const SNAP_HZ = 30;         // broadcast de estado a 30 Hz
 const MAX_PLAYERS = 8;
 const MIN_PLAYERS = 2;
-// Movimiento
-const ACCEL = 1400;         // u/s² aplicada según input normalizado
+// Movimiento (retune v1.2 — sección B; IDÉNTICAS en client.js: la predicción depende)
+const ACCEL = 1600;         // u/s² aplicada según input normalizado (v1.2: antes 1400)
 const MAX_SPEED = 230;      // u/s velocidad máxima del jugador
-const FRICTION = 6;         // damping exponencial jugador: v *= exp(-FRICTION*dt) sin input
+const FRICTION = 7.5;       // damping exponencial jugador: v *= exp(-FRICTION*dt) sin input (v1.2: antes 6)
 // Pelota
 const BALL_FRICTION = 0.9;  // damping exponencial pelota: v *= exp(-BALL_FRICTION*dt)
 const BALL_MAX_SPEED = 750;
 const WALL_BOUNCE = 0.82;   // restitución contra paredes
 // Acciones
-const KICK_RANGE = 36;      // distancia centro-a-centro máx para patear la pelota
+const KICK_RANGE = 44;      // distancia centro-a-centro máx para patear la pelota (v1.2: antes 36)
 const KICK_POWER = 560;     // velocidad que adquiere la pelota al ser pateada
 const KICK_COOLDOWN = 0.35; // s
 const TACKLE_RANGE = 42;    // distancia centro-a-centro máx para barrer a un rival
@@ -49,16 +59,39 @@ const GOAL_PAUSE = 2.0;     // s de pausa tras un gol antes de resetear
 const BALL_SUBSTEPS = 4;          // sub-pasos de integración de la pelota por tick
 const KICK_VEL_FACTOR = 0.45;     // v1.1: patada = KICK_POWER + 0.45 × vel del jugador
 const DRIBBLE_RANGE = PLAYER_R + BALL_R + 8; // 32 u — distancia máx del assist
-const DRIBBLE_FORCE = 400;        // u/s² hacia el punto de control
+const DRIBBLE_FORCE = 320;        // u/s² hacia el punto de control (v1.2: antes 400)
 const DRIBBLE_AHEAD = 22;         // punto objetivo a 22 u adelante del jugador (facing)
-const DRIBBLE_MAX_REL = 260;      // velocidad relativa máx pelota-jugador del assist
+const DRIBBLE_MAX_REL = 240;      // velocidad relativa máx pelota-jugador del assist (v1.2: antes 260)
 const DRIBBLE_MIN_SPEED = 40;     // el assist requiere velocidad del jugador > 40
+const DRIBBLE_CTRL_REL = 140;     // v1.2 (d): assist solo si |vBall − vPlayer| < 140 (pelota controlada)
 const SLIDE_DURATION = 0.38;      // s de barrida (slide): vel fija, sin control
 const SLIDE_SPEED = 320;          // velocidad fija durante el slide
 const SLIDE_KNOCKBACK = 420;      // v1.1: knockback al rival al conectar (pisa 380 de v1)
 const SLIDE_BALL_FACTOR = 0.6;    // impulso a la pelota = 0.6 × SLIDE_KNOCKBACK
 const BALL_PLAYER_E = 0.4;        // v1.1: restitución pelota-jugador
 const BALL_PLAYER_TRANSFER = 0.8; // v1.1: transferencia de la velocidad del jugador
+
+/* ============================ Constantes v1.2 (SPEC) ============================= */
+
+const KICK_BUFFER = 0.16;         // s que se recuerda la intención de kick fuera de rango (sección A)
+const ROOMS_PUSH_MS = 250;        // coalescing del push de salas a suscriptos (sección C)
+
+// Escalabilidad (sección E)
+const BP_SKIP_BYTES = 64 * 1024;   // E.2: bufferedAmount > 64 KB ⇒ saltear el snapshot de esa conexión
+const BP_CLOSE_BYTES = 512 * 1024; // E.2: bufferedAmount > 512 KB ⇒ cerrar la conexión (cliente zombi)
+const MAX_ROOMS = 1000;            // E.5: máximo de salas simultáneas
+// E.5: máximo de conexiones WS (configurable por env MAX_CONN, default 4000).
+const MAX_CONN = (() => {
+  const v = parseInt(process.env.MAX_CONN, 10);
+  return Number.isFinite(v) && v > 0 ? v : 4000;
+})();
+// E.5: rate limit de mensajes por conexión. El contrato dice 60/s de tráfico
+// legítimo (input inmediato con cap 60/s), pero a eso se le suman pings de RTT,
+// keepalives y ráfagas de borde de ventana: el techo de CORTE real es 90/s para
+// no desconectar jamás a un jugador válido. El exceso cierra la conexión.
+const RATE_LIMIT_MAX = 90;         // mensajes por ventana
+const RATE_LIMIT_WINDOW_MS = 1000; // ventana del rate limit
+const METRICS_WINDOW_MS = 10000;   // E.4: ventana móvil de las métricas de tick (10 s)
 
 // Lobby / salas v1.1
 const MODES = ["ffa", "1v1", "2v2"];
@@ -143,6 +176,21 @@ const server = http.createServer((req, res) => {
     res.end("Solicitud inválida");
     return;
   }
+  // v1.2 E.4: endpoints de observabilidad. /health para el health check de Render;
+  // /metrics con ventana móvil de 10 s de duraciones del tick global.
+  if (urlPath === "/health" || urlPath === "/metrics") {
+    const body = JSON.stringify(
+      urlPath === "/health" ? { ok: true, uptime: Math.round(process.uptime()) } : buildMetrics()
+    );
+    res.writeHead(200, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Length": Buffer.byteLength(body),
+      "Cache-Control": "no-cache",
+    });
+    res.end(req.method === "HEAD" ? undefined : body);
+    return;
+  }
+
   if (urlPath === "/" || urlPath === "") urlPath = "/index.html";
 
   const filePath = path.normalize(path.join(PUBLIC_DIR, urlPath));
@@ -176,6 +224,11 @@ const server = http.createServer((req, res) => {
 
 function r2(v) {
   return Math.round(v * 100) / 100;
+}
+
+// v1.2: posiciones y velocidades del state a 1 decimal (~35% menos bytes de JSON).
+function r1(v) {
+  return Math.round(v * 10) / 10;
 }
 
 function num(v) {
@@ -360,13 +413,6 @@ function updateCountdown(room) {
   }
 }
 
-function stopLoop(room) {
-  if (room.interval !== null) {
-    clearInterval(room.interval);
-    room.interval = null;
-  }
-}
-
 function stopCountdown(room) {
   if (room.countdown !== null) {
     clearTimeout(room.countdown);
@@ -375,10 +421,10 @@ function stopCountdown(room) {
 }
 
 function destroyRoom(room) {
-  stopLoop(room);
   stopCountdown(room);
   room.match = null;
   rooms.delete(room.code);
+  notifyRoomsChanged(); // sala borrada: sale de la lista de públicas (v1.2 C)
 }
 
 function addPlayerToRoom(room, ws, name, country) {
@@ -389,6 +435,7 @@ function addPlayerToRoom(room, ws, name, country) {
     ws,
     ready: false,
     team: null,
+    lastSeq: 0, // v1.2: último seq de input aplicado (se expone como iq en state)
   };
   room.players.push(player);
   assignTeamsOnChange(room);
@@ -399,6 +446,7 @@ function addPlayerToRoom(room, ws, name, country) {
   // El jugador nuevo entra sin ready: si había countdown, dejan de cumplirse las
   // condiciones de arranque y se cancela (startCancelled).
   updateCountdown(room);
+  notifyRoomsChanged(); // sala creada o join: cambia count/fullness en la lista (v1.2 C)
 }
 
 function removePlayer(ws) {
@@ -417,8 +465,8 @@ function removePlayer(ws) {
   }
 
   if (room.status === "playing" || room.status === "gameover") {
-    // Se aborta el partido: todos vuelven al lobby con aviso (SPEC), readies reseteados.
-    stopLoop(room);
+    // Se aborta el partido: todos vuelven al lobby con aviso (SPEC), readies
+    // reseteados. status → "lobby" la saca del loop global de ticks (v1.2 E.3).
     room.match = null;
     room.status = "lobby";
     resetReadies(room);
@@ -440,6 +488,9 @@ function removePlayer(ws) {
     // FRESCO de 3 s (nuevo "starting" para todos).
     updateCountdown(room);
   }
+  // Leave/desconexión: cambia count, fullness o status (partido abortado → lobby
+  // vuelve a ser joineable). El caso "sala vacía" lo notifica destroyRoom.
+  notifyRoomsChanged();
 }
 
 /* ============================= Geometría de la cancha ============================ */
@@ -494,7 +545,6 @@ function buildWalls(n) {
 /* =================================== Partido ==================================== */
 
 function startMatch(room) {
-  stopLoop(room);
   stopCountdown(room);
 
   // EQUIPOS (v1.1): el índice del equipo = índice de lado/arco. En ffa/1v1 cada
@@ -546,6 +596,7 @@ function startMatch(room) {
         stun: 0,
         kc: 0,
         tc: 0,
+        kickBuf: 0,      // v1.2: s restantes del KICK BUFFER (intención de patear)
         slide: 0,        // s restantes de barrida (0 si no) — va en state (v1.1)
         sdx: 0,          // dirección fija del slide
         sdy: 0,
@@ -589,7 +640,9 @@ function startMatch(room) {
     },
   });
 
-  room.interval = setInterval(() => tickRoom(room), 1000 * TICK);
+  // v1.2 E.3: no hay interval por sala — el loop GLOBAL de 60 Hz tickea todas las
+  // salas con status === "playing" (esta ya quedó en "playing" arriba).
+  notifyRoomsChanged(); // status → "playing": la sala sale de la lista de públicas (v1.2 C)
 }
 
 function resetPositions(m) {
@@ -605,6 +658,7 @@ function resetPositions(m) {
     b.stun = 0;
     b.kc = 0;
     b.tc = 0;
+    b.kickBuf = 0;
     b.slide = 0;
     b.sdx = 0;
     b.sdy = 0;
@@ -629,15 +683,19 @@ function clampBallSpeed(ball) {
   }
 }
 
-function doKick(m, playerId, b) {
-  b.kc = KICK_COOLDOWN; // el intento siempre dispara el cooldown
+// Patada (v1.2): ejecuta la patada SOLO si la pelota está en rango (devuelve true).
+// Con el KICK BUFFER (sección A) el intento fuera de rango ya NO quema el cooldown:
+// queda bufferedo en b.kickBuf y se ejecuta en el primer tick en que la pelota entra
+// en rango dentro de los 160 ms (si el buffer expira sin conectar, no pasa nada).
+function tryKick(m, playerId, b) {
   const dist = Math.hypot(m.ball.x - b.x, m.ball.y - b.y);
-  if (dist <= KICK_RANGE) {
-    m.ball.vx = b.fx * KICK_POWER + KICK_VEL_FACTOR * b.vx;
-    m.ball.vy = b.fy * KICK_POWER + KICK_VEL_FACTOR * b.vy;
-    clampBallSpeed(m.ball);
-    m.lastTouch = playerId;
-  }
+  if (dist > KICK_RANGE) return false;
+  b.kc = KICK_COOLDOWN;
+  m.ball.vx = b.fx * KICK_POWER + KICK_VEL_FACTOR * b.vx;
+  m.ball.vy = b.fy * KICK_POWER + KICK_VEL_FACTOR * b.vy;
+  clampBallSpeed(m.ball);
+  m.lastTouch = playerId;
+  return true;
 }
 
 // Barrida v1.1: el que barre entra en "slide" de SLIDE_DURATION s con velocidad fija
@@ -755,11 +813,11 @@ function onGoal(room, concededTeam) {
 function endPause(room) {
   const m = room.match;
   if (m.winnerTeam !== null) {
+    // status → "gameover" saca a la sala del loop global de ticks (v1.2 E.3).
     room.status = "gameover";
     m.paused = true;
     broadcastState(room);
     broadcast(room, { type: "gameover", winnerTeam: m.winnerTeam, scores: m.scores.slice() });
-    stopLoop(room);
   } else {
     resetPositions(m);
     m.paused = false;
@@ -767,28 +825,57 @@ function endPause(room) {
   }
 }
 
+// v1.2 A: posiciones y velocidades a 1 decimal (snapshot ~35% más chico). Cada
+// jugador expone vx/vy e iq (= lastSeq de input aplicado): el cliente reconcilia su
+// predicción con pos/vel del server + iq y re-simula sus inputs pendientes.
+// v1.2 E.1: snapshot compacto — stun/kc/slide se OMITEN si valen 0 (el cliente
+// asume 0 si faltan, contrato "campos ausentes = 0").
+// v1.2 E.2/E.3: UN solo JSON.stringify por sala (el mismo string va a los N
+// jugadores) y backpressure por conexión: bufferedAmount > 64 KB saltea el snapshot
+// de ese ciclo (no se acumula); > 512 KB cierra la conexión (cliente zombi).
 function broadcastState(room) {
   const m = room.match;
   if (!m) return;
-  broadcast(room, {
+  const players = [];
+  for (const p of m.order) {
+    const b = m.bodies.get(p.id);
+    const o = {
+      id: p.id,
+      x: r1(b.x),
+      y: r1(b.y),
+      vx: r1(b.vx),
+      vy: r1(b.vy),
+      fx: r2(b.fx),
+      fy: r2(b.fy),
+      iq: p.lastSeq,
+    };
+    const stun = r2(b.stun);
+    const kc = r2(b.kc);
+    const slide = r2(b.slide);
+    if (stun > 0) o.stun = stun;
+    if (kc > 0) o.kc = kc;
+    if (slide > 0) o.slide = slide;
+    players.push(o);
+  }
+  const data = JSON.stringify({
     type: "state",
-    ball: { x: r2(m.ball.x), y: r2(m.ball.y), vx: r2(m.ball.vx), vy: r2(m.ball.vy) },
-    players: m.order.map((p) => {
-      const b = m.bodies.get(p.id);
-      return {
-        id: p.id,
-        x: r2(b.x),
-        y: r2(b.y),
-        fx: r2(b.fx),
-        fy: r2(b.fy),
-        stun: r2(b.stun),
-        kc: r2(b.kc),
-        slide: r2(b.slide),
-      };
-    }),
+    ball: { x: r1(m.ball.x), y: r1(m.ball.y), vx: r1(m.ball.vx), vy: r1(m.ball.vy) },
+    players,
     scores: m.scores.slice(),
     paused: m.paused,
   });
+  for (const p of room.players) {
+    const ws = p.ws;
+    if (ws.readyState !== WebSocket.OPEN) continue;
+    if (ws.bufferedAmount > BP_CLOSE_BYTES) {
+      // Zombi: ni el snapshot salteado le alcanza. terminate() emite "close" de
+      // forma asíncrona (la limpieza de removePlayer NO corre dentro de este loop).
+      ws.terminate();
+      continue;
+    }
+    if (ws.bufferedAmount > BP_SKIP_BYTES) continue; // saltear este ciclo
+    ws.send(data);
+  }
 }
 
 function tickRoom(room) {
@@ -804,10 +891,15 @@ function tickRoom(room) {
     if (stunned) b.stun = Math.max(0, b.stun - dt);
     if (b.kc > 0) b.kc = Math.max(0, b.kc - dt);
     if (b.tc > 0) b.tc = Math.max(0, b.tc - dt);
+    if (b.kickBuf > 0) b.kickBuf = Math.max(0, b.kickBuf - dt);
 
     // Acciones edge-trigger: se consumen acá respetando cooldowns, stun y slide.
+    // KICK BUFFER (v1.2 A): el kick presionado carga 160 ms de intención; se ejecuta
+    // en el primer tick con la pelota en rango y cooldown listo (en rango = ejecuta
+    // ya mismo, como antes). Expirado el buffer, el intento se descarta sin cooldown.
     if (!stunned && b.slide <= 0 && !m.paused) {
-      if (b.wantKick && b.kc <= 0) doKick(m, p.id, b);
+      if (b.wantKick) b.kickBuf = KICK_BUFFER;
+      if (b.kickBuf > 0 && b.kc <= 0 && tryKick(m, p.id, b)) b.kickBuf = 0;
       if (b.wantTackle && b.tc <= 0) startSlide(b);
     }
     b.wantKick = false;
@@ -912,9 +1004,13 @@ function tickRoom(room) {
   } else {
     const ball = m.ball;
 
-    /* -- Dribble assist (v1.1): pelota a ≤ PLAYER_R+BALL_R+8 del jugador MÁS CERCANO
-       a la pelota, con velocidad > 40: fuerza suave de 400 u/s² hacia el punto a 22 u
-       adelante del jugador (facing), velocidad relativa máx 260. -- */
+    /* -- Dribble assist (v1.2 B, arreglado): aplica SOLO si TODAS las condiciones:
+       (a) pelota a ≤ PLAYER_R+BALL_R+8 del jugador,
+       (b) él es el jugador MÁS CERCANO a la pelota,
+       (c) |vel jugador| > 40,
+       (d) |vBall − vPlayer| < 140 (pelota "controlada", moviéndose con el jugador —
+           NO al llegarle a una pelota quieta o que viene de frente: bug v1.1).
+       Fuerza 320 u/s² hacia el punto a 22 u delante del facing; cap relativo 240. -- */
     let nearest = null;
     let nearestD = Infinity;
     for (const b of list) {
@@ -924,18 +1020,20 @@ function tickRoom(room) {
         nearest = b;
       }
     }
-    if (nearest && nearestD <= DRIBBLE_RANGE) {
+    if (nearest && nearestD <= DRIBBLE_RANGE) { // (a) + (b)
       const psp = Math.hypot(nearest.vx, nearest.vy);
-      if (psp > DRIBBLE_MIN_SPEED) {
+      const relSp = Math.hypot(ball.vx - nearest.vx, ball.vy - nearest.vy);
+      const ballSp = Math.hypot(ball.vx, ball.vy);
+      // (e) enmienda: una pelota EN REPOSO nunca recibe assist (hasta el primer
+      // contacto físico que la mueva) — sin esto, acercarse despacio (40 < v < 140)
+      // a una pelota quieta la empujaba lejos, el residuo del bug v1.1.
+      if (psp > DRIBBLE_MIN_SPEED && relSp < DRIBBLE_CTRL_REL && ballSp > 30) { // (c)+(d)+(e)
         const tx = nearest.x + nearest.fx * DRIBBLE_AHEAD;
         const ty = nearest.y + nearest.fy * DRIBBLE_AHEAD;
         let ax = tx - ball.x;
         let ay = ty - ball.y;
         const al = Math.hypot(ax, ay);
-        const rvx0 = ball.vx - nearest.vx;
-        const rvy0 = ball.vy - nearest.vy;
-        // El assist solo actúa por debajo del tope relativo: nunca frena una patada.
-        if (al > 1e-9 && Math.hypot(rvx0, rvy0) < DRIBBLE_MAX_REL) {
+        if (al > 1e-9) { // guard anti-NaN
           ax /= al;
           ay /= al;
           ball.vx += ax * DRIBBLE_FORCE * dt;
@@ -1034,12 +1132,99 @@ function tickRoom(room) {
   }
 }
 
+/* ==================== Loop global de 60 Hz (v1.2 — sección E.3) =================== */
+
+/*
+ * UN solo setInterval para TODO el proceso (en vez de un interval por sala): cada
+ * tick itera las salas y procesa SOLO las que están en "playing" (las salas en
+ * lobby/gameover no se tocan; salir de "playing" las saca solas del loop). Menos
+ * timers activos con muchas salas, mismo contrato (60 Hz física, 30 Hz broadcast,
+ * dt fijo = TICK). La duración de cada tick global se registra para /metrics.
+ * Borrar salas del Map durante la iteración es seguro (semántica de Map en JS), y
+ * tickRoom nunca destruye salas sincrónicamente (terminate() emite close async).
+ */
+/*
+ * Acumulador de tiempo real: setInterval con delay fraccionario (16.667 ms) se
+ * trunca a 16 ms en Node y además acumula drift por el re-armado del timer (medido:
+ * ~56 Hz reales). En su lugar, un timer corto (8 ms) acumula el tiempo transcurrido
+ * con hrtime y ejecuta UN tick fijo de TICK por cada 16.667 ms acumulados, con tope
+ * de catch-up por iteración (pausas largas de GC/CPU no generan ráfagas infinitas:
+ * la deuda excedente se descarta y el juego "pierde" ese tiempo en vez de acelerarse).
+ */
+const TICK_MS = 1000 * TICK;
+const MAX_CATCHUP_TICKS = 4;
+let lastLoopNs = process.hrtime.bigint();
+let tickDebtMs = 0;
+
+setInterval(() => {
+  const nowNs = process.hrtime.bigint();
+  tickDebtMs += Number(nowNs - lastLoopNs) / 1e6;
+  lastLoopNs = nowNs;
+  let ticks = 0;
+  while (tickDebtMs >= TICK_MS && ticks < MAX_CATCHUP_TICKS) {
+    const t0 = process.hrtime.bigint();
+    for (const room of rooms.values()) {
+      if (room.status === "playing") tickRoom(room);
+    }
+    recordTickSample(Number(process.hrtime.bigint() - t0) / 1e6);
+    tickDebtMs -= TICK_MS;
+    ticks += 1;
+  }
+  if (ticks === MAX_CATCHUP_TICKS && tickDebtMs >= TICK_MS) tickDebtMs = 0;
+}, 8);
+
+/* ======================== Métricas (v1.2 — sección E.4) ========================== */
+
+// Ventana móvil de 10 s de duraciones (ms) del tick global: a 60 Hz son ≤ ~600
+// muestras, así que prune con shift() y sort() bajo demanda son triviales.
+const tickSamples = []; // { t: Date.now(), ms } — push al final, prune del frente
+
+function pruneTickSamples(now) {
+  const cutoff = now - METRICS_WINDOW_MS;
+  while (tickSamples.length > 0 && tickSamples[0].t < cutoff) tickSamples.shift();
+}
+
+function recordTickSample(ms) {
+  const now = Date.now();
+  tickSamples.push({ t: now, ms });
+  pruneTickSamples(now);
+}
+
+// GET /metrics → {rooms, playing, players, tickAvgMs, tickP95Ms, rssMB} (SPEC E.4).
+function buildMetrics() {
+  pruneTickSamples(Date.now());
+  let playing = 0;
+  let players = 0;
+  for (const room of rooms.values()) {
+    if (room.status === "playing") playing++;
+    players += room.players.length;
+  }
+  let tickAvgMs = 0;
+  let tickP95Ms = 0;
+  if (tickSamples.length > 0) {
+    const vals = tickSamples.map((s) => s.ms).sort((a, b) => a - b);
+    let sum = 0;
+    for (const v of vals) sum += v;
+    tickAvgMs = sum / vals.length;
+    tickP95Ms = vals[Math.min(vals.length - 1, Math.max(0, Math.ceil(0.95 * vals.length) - 1))];
+  }
+  return {
+    rooms: rooms.size,
+    playing,
+    players,
+    tickAvgMs: Math.round(tickAvgMs * 1000) / 1000,
+    tickP95Ms: Math.round(tickP95Ms * 1000) / 1000,
+    rssMB: Math.round((process.memoryUsage().rss / (1024 * 1024)) * 10) / 10,
+  };
+}
+
 /* ============================== Protocolo WebSocket ============================== */
 
 const wss = new WebSocket.Server({ server, maxPayload: 4096 });
 
 function handleCreate(ws, msg) {
   if (ws.roomRef) return sendError(ws, "Ya estás en una sala");
+  if (rooms.size >= MAX_ROOMS) return sendError(ws, "Servidor lleno"); // v1.2 E.5
   const name = cleanName(msg.name);
   const country = cleanCountry(msg.country);
   if (!name) return sendError(ws, "Nombre inválido");
@@ -1058,7 +1243,6 @@ function handleCreate(ws, msg) {
     nextPlayerNum: 1,
     status: "lobby", // "lobby" | "playing" | "gameover"
     match: null,
-    interval: null,
     countdown: null, // timeout del auto-arranque (3 s) o null
     tickCount: 0,
   };
@@ -1083,9 +1267,8 @@ function handleJoin(ws, msg) {
   addPlayerToRoom(room, ws, name, country);
 }
 
-// {type:"listRooms"} → {type:"rooms", rooms:[...]}: SOLO salas públicas, no llenas
-// y sin partido en curso (SPEC v1.1).
-function handleListRooms(ws) {
+// Lista de salas públicas: SOLO públicas, no llenas y sin partido en curso (SPEC v1.1).
+function buildRoomsList() {
   const list = [];
   for (const room of rooms.values()) {
     if (room.visibility !== "public") continue;
@@ -1102,7 +1285,62 @@ function handleListRooms(ws) {
       stadium: room.stadium,
     });
   }
-  send(ws, { type: "rooms", rooms: list });
+  return list;
+}
+
+// {type:"listRooms"} → {type:"rooms", rooms:[...]} — se mantiene en v1.2 (compat +
+// botón refrescar manual del cliente).
+function handleListRooms(ws) {
+  send(ws, { type: "rooms", rooms: buildRoomsList() });
+}
+
+/* ============== Suscripción a la lista de salas públicas (v1.2 — sección C) ============== */
+
+// Conexiones suscriptas con {type:"subRooms", on:true}: reciben {type:"rooms", ...}
+// (mismo formato v1.1) inmediatamente al suscribirse y un PUSH ante cada cambio que
+// afecte la lista (sala creada/borrada, join/leave, cambio de modo/estadio/status),
+// coalesced a máximo un push cada ROOMS_PUSH_MS (250 ms).
+const roomSubs = new Set();
+let roomsPushTimer = null; // timeout del push agendado, o null
+let roomsPushedAt = 0;     // Date.now() del último push (para el coalescing)
+
+function pushRooms() {
+  if (roomSubs.size === 0) return;
+  roomsPushedAt = Date.now();
+  const data = JSON.stringify({ type: "rooms", rooms: buildRoomsList() });
+  for (const ws of roomSubs) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(data);
+    } else {
+      roomSubs.delete(ws); // conexión muerta: limpiar (borrar durante for-of es seguro en Set)
+    }
+  }
+}
+
+// Notificar un cambio que afecta la lista: push inmediato si el último fue hace
+// ≥ 250 ms; si no, UN solo timer agrupa todos los cambios del intervalo en un push.
+function notifyRoomsChanged() {
+  if (roomSubs.size === 0 || roomsPushTimer !== null) return;
+  const wait = roomsPushedAt + ROOMS_PUSH_MS - Date.now();
+  if (wait <= 0) {
+    pushRooms();
+  } else {
+    roomsPushTimer = setTimeout(() => {
+      roomsPushTimer = null;
+      pushRooms();
+    }, wait);
+  }
+}
+
+// {type:"subRooms", on:true|false} (cliente: on al mostrar el home, off al salir).
+function handleSubRooms(ws, msg) {
+  if (msg.on === true) {
+    roomSubs.add(ws);
+    // Push inmediato a ESTA conexión al suscribirse (SPEC v1.2 C).
+    send(ws, { type: "rooms", rooms: buildRoomsList() });
+  } else if (msg.on === false) {
+    roomSubs.delete(ws);
+  }
 }
 
 // {type:"ready", ready:bool} — cada jugador alterna su estado en el lobby.
@@ -1131,6 +1369,7 @@ function handleSetMode(ws, msg) {
   assignTeams(room);
   broadcastLobby(room);
   updateCountdown(room); // cancela el countdown si lo había (readies reseteados)
+  notifyRoomsChanged(); // el modo (y su cupo máximo) se muestran en la lista (v1.2 C)
 }
 
 // {type:"setStadium", stadium} — solo host.
@@ -1144,6 +1383,7 @@ function handleSetStadium(ws, msg) {
   if (msg.stadium === room.stadium) return;
   room.stadium = msg.stadium;
   broadcastLobby(room);
+  notifyRoomsChanged(); // el estadio se muestra en la lista de salas (v1.2 C)
 }
 
 // {type:"setTeam", team} — cualquiera, solo en 2v2, con validación de cupo (máx 2).
@@ -1166,18 +1406,31 @@ function handleRematch(ws) {
   const room = ws.roomRef;
   if (!room || room.status !== "gameover") return;
   if (room.players[0] !== ws.playerRef) return sendError(ws, "Solo el host puede pedir revancha");
-  stopLoop(room);
   room.match = null;
   room.status = "lobby";
   resetReadies(room);
   broadcastLobby(room);
+  notifyRoomsChanged(); // gameover → lobby: la sala vuelve a la lista de públicas (v1.2 C)
 }
 
 function handleInput(ws, msg) {
   const room = ws.roomRef;
   if (!room || room.status !== "playing" || !room.match || !ws.playerRef) return;
-  const b = room.match.bodies.get(ws.playerRef.id);
+  const player = ws.playerRef;
+  const b = room.match.bodies.get(player.id);
   if (!b) return;
+
+  // seq (v1.2 A): entero incremental por conexión (arranca en 1). Ignorar seq no
+  // numérico y seq ≤ lastSeq (input viejo/reordenado). Compat clientes sin seq:
+  // se aplica igual con seq = lastSeq + 1 (SPEC v1.2, notas de compatibilidad).
+  if (msg.seq === undefined) {
+    player.lastSeq += 1;
+  } else {
+    if (typeof msg.seq !== "number" || !Number.isFinite(msg.seq)) return;
+    const seq = Math.floor(msg.seq);
+    if (seq <= player.lastSeq) return;
+    player.lastSeq = seq;
+  }
 
   // Clampear cada componente a [-1, 1] y normalizar si |v| > 1 (server-side, SPEC).
   let mx = clamp(num(msg.mx), -1, 1);
@@ -1214,6 +1467,16 @@ function handleMessage(ws, msg) {
     case "listRooms":
       handleListRooms(ws);
       break;
+    case "subRooms":
+      handleSubRooms(ws, msg);
+      break;
+    case "ping":
+      // {type:"ping", t} → {type:"pong", t}: eco de t para que el cliente mida RTT
+      // (v1.2 A). Validar que t sea un número (no eco de payloads arbitrarios).
+      if (typeof msg.t === "number" && Number.isFinite(msg.t)) {
+        send(ws, { type: "pong", t: msg.t });
+      }
+      break;
     case "ready":
       handleReady(ws, msg);
       break;
@@ -1244,16 +1507,39 @@ wss.on("connection", (ws) => {
   ws.isAlive = true;
   ws.roomRef = null;
   ws.playerRef = null;
-
-  ws.on("pong", () => {
-    ws.isAlive = true;
-  });
+  ws.rlCount = 0;           // rate limit (v1.2 E.5): mensajes en la ventana actual
+  ws.rlStart = Date.now();  // inicio de la ventana del rate limit
 
   ws.on("error", () => {
     /* evitar crash por errores de socket; close se encarga de la limpieza */
   });
 
+  // v1.2 E.5: límite de conexiones (wss.clients ya incluye a ésta). El error viaja
+  // antes del close frame; el cliente ve "Servidor lleno".
+  if (wss.clients.size > MAX_CONN) {
+    sendError(ws, "Servidor lleno");
+    ws.close(1013, "Servidor lleno"); // 1013 = try again later
+    return;
+  }
+
+  ws.on("pong", () => {
+    ws.isAlive = true;
+  });
+
   ws.on("message", (data) => {
+    // v1.2 E.5: rate limit por conexión ANTES de parsear (lo más barato posible).
+    // Ventana fija de 1 s; al superar RATE_LIMIT_MAX se corta con terminate()
+    // (con un flooder no tiene sentido esperar el handshake de close).
+    const now = Date.now();
+    if (now - ws.rlStart >= RATE_LIMIT_WINDOW_MS) {
+      ws.rlStart = now;
+      ws.rlCount = 0;
+    }
+    if (++ws.rlCount > RATE_LIMIT_MAX) {
+      ws.terminate();
+      return;
+    }
+
     let msg;
     try {
       msg = JSON.parse(data);
@@ -1269,6 +1555,7 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
+    roomSubs.delete(ws); // baja de la suscripción a la lista de salas (v1.2 C)
     removePlayer(ws);
   });
 });

@@ -380,3 +380,155 @@ CANTIDAD DE EQUIPOS** (no de jugadores): n=2 → rectángulo, n≥3 → polígon
 - Persistir y restaurar perfil/settings NO debe romper si localStorage está deshabilitado
   (try/catch).
 - Compatibilidad con clientes v1.0: NO se mantiene (mismo deploy actualiza ambos lados).
+
+---
+
+# v1.2 — CAMBIOS (este bloque PISA a v1 y v1.1 donde los contradiga)
+
+Objetivos: jugabilidad responsiva (netcode con predicción), salas públicas confiables
+(push del server), packs de voz reales para el relator, y arquitectura que aguante
+1000 jugadores simultáneos (≈250 salas) en un solo proceso.
+
+## A. NETCODE — predicción + reconciliación (LO MÁS IMPORTANTE)
+
+Problema v1.1: input batched a 30 Hz + tick server + broadcast + 100 ms de interpolación
++ RTT a Render ⇒ ~300-400 ms percibidos. Solución estándar:
+
+### Protocolo
+- `input` gana `seq` (entero incremental por conexión, arranca en 1):
+  `{type:"input", seq, mx, my, kick, tackle}`. El cliente lo manda INMEDIATAMENTE al
+  cambiar el vector de movimiento o al presionar kick/tackle (cap 60 msgs/s) y además
+  un keepalive a 20 Hz mientras juega. El server guarda por jugador `lastSeq` (último
+  input aplicado; ignora seq ≤ lastSeq y seq no numérico).
+- `state`: cada jugador gana `iq` = lastSeq aplicado (para reconciliación del propio).
+  Posiciones y velocidades REDONDEADAS a 1 decimal (Math.round(v*10)/10) para achicar
+  el JSON (~35% menos bytes).
+- Ping: `{type:"ping", t}` (cliente, t = performance.now()) → `{type:"pong", t}` (eco).
+  Cliente lo manda cada 2 s; muestra RTT en un indicador (#ping-indicator) con color
+  (verde <80 ms, amarillo <180, rojo ≥180).
+
+### Cliente — predicción del PROPIO jugador
+- Mantener `pendingInputs` = [{seq, mx, my, dt}] desde el último acked.
+- Simulación local del propio jugador IDÉNTICA al server (función compartida copiada:
+  ACCEL/FRICTION/MAX_SPEED + confinamiento a la cancha + stun/slide bloquean control),
+  corriendo en el rAF con dt real.
+- Al llegar `state`: tomar pos/vel del server del propio jugador + su `iq`, descartar
+  pendientes con seq ≤ iq, re-simular los pendientes desde ese estado → posición
+  predicha. El RENDER del propio jugador usa SIEMPRE la predicción.
+- Suavizado de corrección: la diferencia entre predicción nueva y render anterior se
+  absorbe con un offset que decae a 0 en ~120 ms (lerp exponencial); si la diferencia
+  es > 80 u, snap directo.
+- La PELOTA y los RIVALES siguen interpolados (sin predicción), pero con DELAY
+  ADAPTATIVO: interpDelay = clamp(snapInterval*1.5 + jitter, 50, 160) ms, recalculado
+  con las últimas ~20 llegadas de snapshots (jitter = desvío estándar). Reemplaza el
+  100 ms fijo.
+- Feedback inmediato local al patear/barrer: animación + SFX al presionar (sin esperar
+  al server).
+
+### Server — kick buffer y stun de barrida
+- KICK BUFFER: si llega kick y la pelota está fuera de rango, recordar la intención
+  160 ms; ejecutarla en el primer tick en que la pelota entre en rango (respetando
+  cooldown). Evita el "apreté y no pateó" con latencia.
+
+## B. GAME FEEL — retune (cambios a la tabla de constantes compartidas)
+
+```js
+const ACCEL = 1600;        // antes 1400 — más respuesta
+const FRICTION = 7.5;      // antes 6 — frena antes, menos "patinada"
+const KICK_RANGE = 44;     // antes 36 — más fácil conectar la patada
+// El resto de constantes v1/v1.1 quedan igual.
+```
+
+- **DRIBBLE ASSIST arreglado** (bug v1.1: al correr hacia una pelota libre, el assist
+  la empujaba en tu facing = se escapaba). Nueva condición — aplica SOLO si TODAS:
+  (a) pelota a ≤ PLAYER_R+BALL_R+8 del jugador, (b) es el jugador más cercano,
+  (c) |vel jugador| > 40, (d) **|vBall − vPlayer| < 140** (pelota "controlada", moviéndose
+  con el jugador — NO cuando le estás llegando a una pelota quieta o que viene de frente).
+  Fuerza 320 u/s² (antes 400) hacia el punto a 22 u delante del facing; cap velocidad
+  relativa 240. Resultado: la pelota quieta SE QUEDA QUIETA hasta que la tocás; una vez
+  en control, te acompaña al pie.
+
+## C. SALAS PÚBLICAS — push del server (fix del bug "no se ve la sala")
+
+- Causa raíz v1.1: el cliente dependía de polling cada 3 s con guard de document.hidden
+  (que bloqueaba hasta el botón refrescar) y sin reacción a visibilitychange.
+- **Nuevo: suscripción.** `{type:"subRooms", on:true|false}` (cliente). El server
+  mantiene un Set de conexiones suscriptas y les PUSHEA `{type:"rooms", rooms:[...]}`
+  (mismo formato v1.1) inmediatamente al suscribirse y cada vez que cambia algo que
+  afecte la lista (sala creada/borrada, join/leave, cambio de modo/estadio/visibilidad/
+  status). Coalescing: máximo un push cada 250 ms por cambio múltiple.
+- Cliente: `subRooms on` al mostrar el home, `off` al salir. `listRooms` SIGUE
+  funcionando (compat + botón refrescar manual, que ahora NO chequea document.hidden).
+  En `visibilitychange` a visible estando en home: re-suscribir + pedir lista.
+- La PROPIA sala pública del usuario aparece en la lista de otros — y si el usuario
+  está en el home con una sala creada en otra pestaña, la ve como cualquier otra.
+
+## D. RELATOR — packs de voz REALES (+ fallback sintético)
+
+NO se incluye audio con derechos (voces de PES/broadcasters = copyright). En su lugar:
+- **Sistema de packs**: si existe `public/voices/manifest.json`, el cliente lo carga
+  (fetch al entrar al juego, cache en memoria) y usa audio real. Formato:
+  ```json
+  { "name": "Mi relator", "events": {
+      "start":   ["start1.mp3", "start2.mp3"],
+      "goal":    ["gol1.mp3", "gol2.mp3", "gol3.mp3"],
+      "owngoal": ["encontra1.mp3"],
+      "tackle":  ["patada1.mp3"],
+      "streak":  ["intratable1.mp3"],
+      "win":     ["campeon1.mp3"]
+  }}
+  ```
+  Rutas relativas a `public/voices/`. Reproducción: elegir al azar dentro del evento,
+  por el masterGain de WebAudio (respeta volumen/mute), sin solapar (si hay uno sonando,
+  el nuevo solo lo reemplaza si el evento es "goal"/"win"). Si falta el manifest o un
+  archivo falla → fallback al relator speechSynthesis v1.1 frase a frase.
+- `voices/` se agrega a .gitignore SALVO `voices/README.md` (instrucciones para que el
+  usuario ponga sus propios audios, cómo nombrarlos y el manifest de ejemplo).
+- En opciones, bajo el toggle Relator, mostrar el nombre del pack activo si hay
+  (`#relator-pack-label`, texto chico) o "Voz sintética".
+
+## E. ESCALABILIDAD — 1000 jugadores simultáneos en un proceso
+
+Meta medible: 250 salas × 4 jugadores (1000 conexiones WS) en un solo proceso Node con
+tick medio < 8 ms y sin crecimiento de memoria. Cambios server:
+
+1. **Snapshots compactos**: redondeo a 1 decimal (ya en A), y NO enviar campos nulos
+   (stun/kc/slide solo si > 0 — el cliente asume 0 si faltan).
+2. **Backpressure**: si `ws.bufferedAmount > 64 KB`, saltear el snapshot de ESA conexión
+   este ciclo (no acumular); si supera 512 KB, cerrar la conexión (cliente zombi).
+3. **Loops eficientes**: un solo `setInterval` GLOBAL de 60 Hz que itera las salas en
+   estado "playing" (en vez de un interval por sala — menos timers, mismo contrato);
+   salas en lobby no se procesan. `JSON.stringify` del snapshot UNA vez por sala
+   (broadcast del mismo string a los N jugadores).
+4. **Métricas**: `GET /health` → `{ok:true, uptime}` (para el health check de Render) y
+   `GET /metrics` → `{rooms, playing, players, tickAvgMs, tickP95Ms, rssMB}` calculadas
+   con ventana móvil de 10 s.
+5. **Límites anti-abuso**: máx 4000 conexiones (configurable env MAX_CONN), máx 1000
+   salas; al superar: error "Servidor lleno". Rate limit de mensajes por conexión
+   (60/s; exceso → cerrar).
+6. **Herramienta de carga**: `tools/loadtest.js` (Node, usa ws): argumentos
+   `--url --rooms N --players 4 --minutes M`; cada sala: create + joins + ready,
+   y bots que mandan input a 20 Hz con movimiento pseudoaleatorio determinista
+   (semilla por índice) y patean al estar cerca; mide e imprime cada 10 s: salas
+   activas, msgs/s recibidos, RTT p50/p95 de pings, y al final un resumen. NO se
+   incluye en el deploy (carpeta tools/ fuera de public/).
+7. **ARCHITECTURE.md**: documento corto: capacidad de un proceso (números del loadtest
+   local), límites del plan free de Render (0.1 CPU, sleep), recomendación de plan, y
+   el camino horizontal futuro (sharding de salas por instancia + directorio de salas
+   compartido + sticky por código — NO implementarlo ahora, solo documentado).
+
+## F. UI nueva (IDs OBLIGATORIOS)
+
+- `#ping-indicator`: pill chiquita esquina inferior derecha del juego (RTT en ms +
+  puntito de color). Clases `.ping-good/.ping-mid/.ping-bad`.
+- `#relator-pack-label`: línea bajo la fila Relator del modal de opciones.
+- Fila de visibilidad del home: agregar subtítulo fijo chico bajo el segmented
+  ("Pública: aparece en la lista para cualquiera · Privada: solo con el código").
+- En la tarjeta de la PROPIA sala en #rooms-list (si pasara a verse), badge "Tu sala".
+
+## Notas de compatibilidad
+
+- `input` sin `seq` (cliente viejo) → el server lo aplica igual con seq=lastSeq+1.
+- `listRooms` se mantiene. `state` con campos ausentes = 0 (cliente nuevo lo asume).
+- Constantes nuevas (ACCEL/FRICTION/KICK_RANGE) deben quedar IDÉNTICAS en server.js y
+  client.js (la predicción depende de eso).

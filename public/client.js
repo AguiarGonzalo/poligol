@@ -1,12 +1,26 @@
 "use strict";
 
 /* ============================================================
- * PoliGol — cliente v1.1 (vanilla JS, sin dependencias).
- * ETAPA 1: lógica y flujo. Conexión WebSocket, pantallas
- * home/lobby/juego, salas públicas (listRooms + polling), lobby v2
- * (ready / modo / estadio / equipos / countdown), scoreboard por
- * EQUIPO, perfil y settings en localStorage, joystick dinámico,
- * fullscreen+landscape en móvil y vibración.
+ * PoliGol — cliente v1.2 (vanilla JS, sin dependencias).
+ * ETAPA 1 v1.2 — PREDICCIÓN, NETCODE Y SALAS (SPEC A/C/F):
+ *   predicción     — simulación local del PROPIO jugador idéntica al server
+ *                    (ACCEL 1600 / FRICTION 7.5 / MAX_SPEED 230 + confinamiento
+ *                    + stun/slide), pendingInputs con seq, reconciliación con
+ *                    iq, offset de corrección que decae ~120 ms (snap > 80 u)
+ *   input          — envío INMEDIATO al cambiar (cap 60/s) + keepalive 20 Hz,
+ *                    seq incremental por conexión; feedback local de
+ *                    patada/barrida al presionar (anim + SFX, KICK_RANGE 44)
+ *   interpolación  — delay ADAPTATIVO 50–160 ms (snapInterval×1.5 + jitter,
+ *                    ventana ~20 llegadas) para pelota y rivales
+ *   ping           — {ping,t}→{pong,t} cada 2 s → #ping-indicator con
+ *                    .ping-good/.ping-mid/.ping-bad
+ *   salas          — subRooms on/off (push del server), re-suscripción en
+ *                    visibilitychange, refresh manual SIN document.hidden,
+ *                    badge "Tu sala" (.room-card.mine)
+ *
+ * v1.1 (se mantiene): pantallas home/lobby/juego, lobby v2 (ready / modo /
+ * estadio / equipos / countdown), scoreboard por EQUIPO, perfil y settings
+ * en localStorage, joystick dinámico, fullscreen+landscape y vibración.
  *
  * ETAPA 2: render, FX y audio v1.1 (todos los hooks implementados).
  *   drawPlayerFeet — botines con zancada por distancia + pose/polvito de barrida
@@ -17,6 +31,15 @@
  *   SFX (WebAudio) — pop de patada, slide-whistle+boing, bocina+ovación, doink
  *                    con rate-limit, beeps de cuenta, fanfarria kazoo (× volumen)
  *   commentator    — relator speechSynthesis es-AR>es-419>es-MX>es-US>es-ES>es*
+ *
+ * ETAPA 2 v1.2 — PACKS DE VOZ (SPEC D):
+ *   voice pack     — public/voices/manifest.json (fetch único al entrar al
+ *                    juego, 404 silencioso) → clips ArrayBuffer→AudioBuffer
+ *                    reproducidos por masterGain (volumen/mute EN VIVO);
+ *                    eventos start/goal/owngoal/tackle/streak/win mapeados
+ *                    1:1 con el sintético, no-solapado (solo gol/campeón
+ *                    pisan), fallback speechSynthesis POR EVENTO,
+ *                    #relator-pack-label con el nombre del pack activo
  * ============================================================ */
 
 /* ================= Constantes compartidas (SPEC, = server.js) ================= */
@@ -27,15 +50,29 @@ const GOAL_W = 112;         // ancho del arco
 const WIN_SCORE = 3;        // puntaje objetivo
 const RECT_W = 480;         // half-extent horizontal para n = 2
 const RECT_H = 290;         // half-extent vertical para n = 2
+// v1.2 (SPEC B): la PREDICCIÓN exige estos valores IDÉNTICOS a server.js.
+const ACCEL = 1600;         // u/s² según input normalizado (v1.2: antes 1400)
+const MAX_SPEED = 230;      // u/s velocidad máxima del jugador
+const FRICTION = 7.5;       // damping exponencial sin input (v1.2: antes 6)
+const SLIDE_SPEED = 320;    // velocidad fija durante la barrida (v1.1)
+const KICK_RANGE = 44;      // alcance de la patada (v1.2: antes 36) — feedback local
 const TACKLE_COOLDOWN = 1.6; // s — solo para feedback visual del botón táctil
 
 /* ======================= Constantes propias del cliente ======================= */
 const WORLD_MARGIN = 70;    // margen alrededor del bounding del polígono (SPEC render)
-const INTERP_DELAY = 100;   // ms: se renderiza 100 ms en el pasado (SPEC)
-const INPUT_HZ = 30;        // envío de input a ~30 Hz (SPEC)
 const JOY_RADIUS = 38;      // px de recorrido máximo del stick del joystick
-const ROOMS_POLL_MS = 3000; // polling de listRooms mientras el home está visible (SPEC)
 const ROOM_NAME_MAX = 24;   // largo máximo del nombre de sala (SPEC)
+// Netcode v1.2 (SPEC A)
+const INPUT_MIN_GAP_MS = 1000 / 60; // cap de 60 mensajes de input por segundo
+const KEEPALIVE_MS = 50;    // keepalive de input a 20 Hz mientras se juega
+const PING_MS = 2000;       // ping cada 2 s → #ping-indicator
+const CORR_DECAY = 25;      // 1/s: el offset de corrección decae a ~5% en 120 ms
+const CORR_SNAP = 80;       // u: corrección mayor que esto ⇒ snap directo
+const INTERP_MIN = 50;      // ms — piso del delay adaptativo de interpolación
+const INTERP_MAX = 160;     // ms — techo del delay adaptativo
+const ARRIVALS_WINDOW = 20; // ~20 llegadas de snapshots para snapInterval + jitter
+const SNAP_GAP_CAP = 400;   // ms: un gap outlier (pestaña oculta) no rompe la media
+const PENDING_MAX = 240;    // tope de pendingInputs (~4 s) si el server deja de ackear
 const PROFILE_KEY = "poligol.profile";   // localStorage: { name, country }
 const SETTINGS_KEY = "poligol.settings"; // localStorage: { sound, relator, fx, vibration, names }
 
@@ -134,6 +171,7 @@ const btnKick = $("btn-kick");
 const btnTackle = $("btn-tackle");
 const rotateOverlay = $("rotate-overlay");         // v1.1
 const btnGameOptions = $("btn-game-options");      // v1.1 (engranaje flotante en juego)
+const pingIndicator = $("ping-indicator");         // v1.2 (pill RTT; puntito vía CSS ::before)
 // Opciones
 const optionsModal = $("options-modal");           // v1.1
 const optSound = $("opt-sound");                   // v1.1 (range 0–100)
@@ -142,6 +180,7 @@ const optFx = $("opt-fx");                         // v1.1 (select low/high)
 const optVibration = $("opt-vibration");           // v1.1 (checkbox)
 const optNames = $("opt-names");                   // v1.1 (checkbox)
 const btnOptionsClose = $("btn-options-close");    // v1.1
+const relatorPackLabel = $("relator-pack-label");  // v1.2 (SPEC D): pack activo o "Voz sintética"
 // Contenedores v1 (pueden cambiar en el HTML v1.1: usar con guardas)
 const endgameActions = document.querySelector(".endgame-actions");
 const lobbyCard = document.querySelector(".lobby-card");
@@ -193,6 +232,7 @@ function syncSettingsUI() {
   if (optFx) optFx.value = settings.fx;
   if (optVibration) optVibration.checked = settings.vibration;
   if (optNames) optNames.checked = settings.names;
+  updateRelatorPackLabel(); // v1.2 (SPEC D): nombre del pack o "Voz sintética"
 }
 
 function openOptions() {
@@ -267,6 +307,15 @@ let wsQueue = [];
 let myId = null;
 let hostId = null;
 let roomCode = null;
+// Última sala propia (NO se limpia en goHome, que anula roomCode): el badge
+// "Tu sala" de #rooms-list compara contra esto. localStorage cubre el caso
+// multi-pestaña del SPEC C (la sala se creó en otra pestaña del mismo navegador).
+let myLastRoomCode = null;
+try {
+  myLastRoomCode = localStorage.getItem("poligol.lastRoom") || null;
+} catch (err) {
+  /* localStorage deshabilitado */
+}
 let selectedCountry = null;
 let phase = "home";        // "home" | "lobby" | "game"
 let ended = false;         // true tras gameover (hasta rematch / salir)
@@ -278,10 +327,26 @@ let snaps = [];            // buffer de snapshots {t, ball, players(Map), paused
 let scoreItems = [];       // team index → {root, valEl, value}
 let overlayTimers = [];
 let copiedTimer = 0;
-let inputTimer = 0;
+let inputTimer = 0;        // keepalive de input a 20 Hz (v1.2)
 let tackleCdUntil = 0;
-let roomsPollTimer = 0;    // polling de listRooms (solo home visible)
+let kickCdUntil = 0;       // cooldown LOCAL de kick (el kc del snapshot llega tarde ~interpDelay+RTT/2)
 let lobbyCountdownTimer = 0;
+
+// Netcode v1.2 (SPEC A) — predicción del propio jugador + reconciliación.
+let inputSeq = 0;          // seq incremental por conexión (el primer input manda 1)
+let lastSentMx = 0;        // último vector de movimiento enviado (detección de cambio)
+let lastSentMy = 0;
+let lastInputSendT = -1e9; // performance.now() del último input enviado (cap 60/s)
+let queuedKick = false;    // acción latcheada si el cap pospuso el envío
+let queuedTackle = false;
+let pendingInputs = [];    // [{seq, mx, my, dt}] aún sin ack del server
+let pred = null;           // estado predicho del PROPIO jugador {x,y,vx,vy,fx,fy,stun,slide,sdx,sdy}
+let corrX = 0;             // offset de corrección: render propio = pred + corr
+let corrY = 0;             //   (decae a 0 en ~120 ms; snap directo si > CORR_SNAP)
+let lastPaused = false;    // último paused del server (congela la predicción)
+let snapArrivals = [];     // llegadas de snapshots (ventana ~20) → delay adaptativo
+let interpDelay = 100;     // ms: clamp(snapInterval*1.5 + jitter, 50, 160) (SPEC A)
+let pingTimer = 0;         // ping cada 2 s mientras la conexión esté abierta
 let goalStreak = { team: null, count: 0 }; // racha para el relator (etapa 2)
 
 // Efectos visuales
@@ -317,9 +382,19 @@ function wsUrl() {
 
 function connectWs() {
   ws = new WebSocket(wsUrl());
+  // seq de input por CONEXIÓN (SPEC A): cada socket nuevo arranca de cero.
+  inputSeq = 0;
+  pendingInputs = [];
   ws.onopen = () => {
     for (const item of wsQueue) ws.send(item.data);
     wsQueue = [];
+    // Reconexión estando en el home: re-suscribirse al push de salas (v1.2).
+    // El server pushea la lista inmediatamente al suscribirse (idempotente).
+    if (phase === "home") {
+      roomsSubbed = true;
+      ws.send(JSON.stringify({ type: "subRooms", on: true }));
+    }
+    startPing();
   };
   ws.onmessage = (ev) => {
     let msg;
@@ -332,6 +407,7 @@ function connectWs() {
   };
   ws.onclose = () => {
     ws = null;
+    stopPing();
     const hadJoinIntent = wsQueue.some((i) => i.type === "create" || i.type === "join");
     // Nunca dejar mensajes viejos encolados para una conexión futura.
     wsQueue = [];
@@ -339,9 +415,15 @@ function connectWs() {
       toast("Se perdió la conexión con el servidor");
       goHome(false);
     } else if (hadJoinIntent) {
-      // La conexión falló con un create/join pendiente: avisar. (El polling de
-      // salas reintenta solo en el próximo tick, sin toast.)
+      // La conexión falló con un create/join pendiente: avisar.
       toast("No se pudo conectar al servidor");
+    }
+    // v1.2: sin polling, la lista de salas vive del push del server. Si el home
+    // quedó sin conexión, reintentar cada 3 s para recuperar la suscripción.
+    if (phase === "home") {
+      setTimeout(() => {
+        if (phase === "home" && !ws) ensureWs();
+      }, 3000);
     }
   };
   ws.onerror = () => {};
@@ -369,6 +451,9 @@ function wsSend(msg) {
       ensureWs();
       return;
     }
+  } else if (msg.type === "subRooms") {
+    // Solo importa el último estado de suscripción (v1.2).
+    wsQueue = wsQueue.filter((item) => item.type !== "subRooms");
   }
   wsQueue.push({ type: msg.type, data });
   ensureWs();
@@ -410,15 +495,61 @@ function handleMessage(msg) {
     case "gameover":
       handleGameover(msg);
       break;
+    case "pong":
+      handlePong(msg);
+      break;
     default:
       break;
   }
+}
+
+/* ============================ Ping → #ping-indicator ============================ */
+// {type:"ping", t:performance.now()} cada 2 s → el server ecoa {type:"pong", t}.
+// RTT en la pill #ping-indicator: verde < 80 ms, amarillo < 180, rojo ≥ 180 (SPEC A/F).
+function sendPing() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "ping", t: performance.now() }));
+  }
+}
+
+function startPing() {
+  stopPing();
+  sendPing();
+  pingTimer = setInterval(sendPing, PING_MS);
+}
+
+function stopPing() {
+  if (pingTimer) {
+    clearInterval(pingTimer);
+    pingTimer = 0;
+  }
+  // Sin conexión no hay medición: vaciar la pill (CSS la oculta con :empty).
+  if (pingIndicator) {
+    pingIndicator.textContent = "";
+    pingIndicator.classList.remove("ping-good", "ping-mid", "ping-bad");
+  }
+}
+
+function handlePong(msg) {
+  if (typeof msg.t !== "number" || !isFinite(msg.t)) return;
+  const rtt = Math.max(0, performance.now() - msg.t);
+  if (!pingIndicator) return;
+  pingIndicator.textContent = Math.round(rtt) + " ms";
+  pingIndicator.classList.toggle("ping-good", rtt < 80);
+  pingIndicator.classList.toggle("ping-mid", rtt >= 80 && rtt < 180);
+  pingIndicator.classList.toggle("ping-bad", rtt >= 180);
 }
 
 function handleJoined(msg) {
   myId = msg.playerId;
   hostId = msg.hostId;
   roomCode = msg.room;
+  myLastRoomCode = msg.room;
+  try {
+    localStorage.setItem("poligol.lastRoom", msg.room);
+  } catch (err) {
+    /* localStorage deshabilitado */
+  }
   match = null;
   lobby = null;
   myReady = false;
@@ -438,9 +569,9 @@ function showScreen(name) {
   // body.in-game: oculta el engranaje global durante el partido (style.css) sin
   // depender de :has(), que falta en Firefox <121 y Safari/iOS <15.4.
   document.body.classList.toggle("in-game", name === "game");
-  // Polling de salas públicas SOLO mientras el home está visible (SPEC).
-  if (name === "home") startRoomsPolling();
-  else stopRoomsPolling();
+  // v1.2: suscripción push de salas públicas SOLO mientras el home está visible.
+  if (name === "home") homeRoomsOn();
+  else homeRoomsOff();
   updateRotateOverlay();
 }
 
@@ -463,6 +594,10 @@ function goHome(sendLeave) {
   dustFx = [];
   feetState.clear();
   relatorStop();
+  resetPrediction();
+  snapArrivals = [];
+  interpDelay = 100;
+  lastPaused = false;
   ended = false;
   roomCode = null;
   phase = "home";
@@ -559,24 +694,41 @@ on(nameInput, "keydown", (e) => {
 }
 
 /* ------------------------- Salas públicas (#rooms-list) ------------------------- */
+// v1.2 (SPEC C): el server PUSHEA {type:"rooms"} a las conexiones suscriptas con
+// {type:"subRooms", on:true|false} — inmediatamente al suscribirse y ante cada
+// cambio. listRooms queda solo para el botón refrescar manual (compat), que NO
+// chequea document.hidden.
 function requestRooms() {
   if (phase !== "home") return;
-  if (document.hidden) return; // pestaña oculta: no gastar red, reintenta el próximo tick
   wsSend({ type: "listRooms" });
 }
 
-function startRoomsPolling() {
-  stopRoomsPolling();
-  requestRooms();
-  roomsPollTimer = setInterval(requestRooms, ROOMS_POLL_MS);
+let roomsSubbed = false; // suscripción activa (evita "off" redundantes)
+
+function homeRoomsOn() {
+  // Re-suscribirse siempre es idempotente en el server y fuerza un push fresco.
+  roomsSubbed = true;
+  wsSend({ type: "subRooms", on: true }); // el server responde con la lista al toque
 }
 
-function stopRoomsPolling() {
-  if (roomsPollTimer) {
-    clearInterval(roomsPollTimer);
-    roomsPollTimer = 0;
+function homeRoomsOff() {
+  if (!roomsSubbed) return;
+  roomsSubbed = false;
+  // Solo des-suscribir si hay conexión viva: no abrir un socket para decir "off".
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "subRooms", on: false }));
+  } else {
+    wsQueue = wsQueue.filter((item) => item.type !== "subRooms");
   }
 }
+
+// Pestaña que vuelve a ser visible estando en el home: re-suscribir + pedir la
+// lista (SPEC C — fix del bug v1.1 "no se ve la sala").
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden || phase !== "home") return;
+  homeRoomsOn();
+  requestRooms();
+});
 
 on(btnRefreshRooms, "click", () => {
   // Giro de feedback (.spinning, definido en style.css); se quita al terminar.
@@ -598,7 +750,10 @@ function handleRooms(msg) {
   if (phase !== "home" || !roomsList) return;
   const list = Array.isArray(msg.rooms) ? msg.rooms : [];
   const key = JSON.stringify(
-    list.map((r) => [r.code, r.roomName, r.hostName, r.count, r.max, r.mode, r.stadium])
+    list.map((r) => [
+      r.code, r.roomName, r.hostName, r.count, r.max, r.mode, r.stadium,
+      r.code === roomCode, // el badge "Tu sala" también invalida el cache de render
+    ])
   );
   if (key === lastRoomsKey) return;
   lastRoomsKey = key;
@@ -618,6 +773,9 @@ function renderRooms(list) {
     const code = typeof r.code === "string" ? r.code : "";
     const card = document.createElement("li");
     card.className = "room-card";
+    // Badge "Tu sala" (v1.2 F): si la PROPIA sala aparece en la lista, style.css
+    // dibuja el badge vía .room-card.mine::after.
+    if (code && (code === roomCode || code === myLastRoomCode)) card.classList.add("mine");
 
     const info = document.createElement("div");
     info.className = "room-card-info";
@@ -681,6 +839,8 @@ function handleLobby(msg) {
     dustFx = [];
     feetState.clear();
     relatorStop();
+    resetPrediction();
+    lastPaused = false;
     ended = false;
   }
   phase = "lobby";
@@ -851,6 +1011,9 @@ on(btnLeave, "click", () => goHome(true));
 
 /* -------------------- Countdown de auto-arranque (#lobby-countdown) -------------------- */
 function handleStarting(msg) {
+  // Pre-carga del pack de voz durante la cuenta de 3 (idempotente): así el
+  // clip de "start" llega bajado y decodificado al pitazo inicial (SPEC D).
+  loadVoicePack();
   if (phase !== "lobby") return;
   let n = Math.round(typeof msg.in === "number" && isFinite(msg.in) ? msg.in : 3);
   if (n < 1) n = 3;
@@ -1017,6 +1180,7 @@ function teamLabel(team) {
 }
 
 function handleStart(msg) {
+  loadVoicePack(); // al entrar al juego, una sola vez (cache en memoria, SPEC D)
   const cfg = msg.config;
   if (!cfg || !Array.isArray(cfg.players) || !Array.isArray(cfg.teams)) return;
   const n = cfg.teams.length; // n = cantidad de EQUIPOS (v1.1); arco k = equipo k
@@ -1051,9 +1215,10 @@ function handleStart(msg) {
   });
 
   const me = byId.get(myId);
+  const stadium = typeof cfg.stadium === "string" ? cfg.stadium : "clasico";
   match = {
     mode: typeof cfg.mode === "string" ? cfg.mode : "ffa",
-    stadium: typeof cfg.stadium === "string" ? cfg.stadium : "clasico",
+    stadium,
     n,
     players,
     byId,
@@ -1063,8 +1228,13 @@ function handleStart(msg) {
     verts: geo.verts,
     bounds: geo.bounds,
     fieldPath: buildFieldPath(geo.verts),
+    phys: clientStadiumPhys(stadium), // accel/friction efectivas (= server, v1.2)
   };
   snaps = [];
+  resetPrediction();
+  snapArrivals = [];
+  interpDelay = 100;
+  lastPaused = false;
   ringFx = [];
   ballTrail = [];
   confetti = [];
@@ -1072,6 +1242,7 @@ function handleStart(msg) {
   ballSpin = 0;
   ended = false;
   tackleCdUntil = 0;
+  kickCdUntil = 0;
   goalStreak = { team: null, count: 0 };
   feetState.clear();
   dustFx = [];
@@ -1103,26 +1274,73 @@ function handleStart(msg) {
 function handleState(msg) {
   if (!match || phase !== "game") return;
   const t = performance.now();
+
+  // Delay adaptativo (SPEC A): snapInterval medio + jitter (desvío estándar) de
+  // las últimas ~20 llegadas → interpDelay = clamp(media*1.5 + jitter, 50, 160).
+  snapArrivals.push(t);
+  if (snapArrivals.length > ARRIVALS_WINDOW + 1) snapArrivals.shift();
+  if (snapArrivals.length >= 3) {
+    let mean = 0;
+    const gaps = [];
+    for (let i = 1; i < snapArrivals.length; i++) {
+      gaps.push(Math.min(SNAP_GAP_CAP, snapArrivals[i] - snapArrivals[i - 1]));
+    }
+    for (const g of gaps) mean += g;
+    mean /= gaps.length;
+    let varAcc = 0;
+    for (const g of gaps) varAcc += (g - mean) * (g - mean);
+    const jitter = Math.sqrt(varAcc / gaps.length);
+    interpDelay = Math.min(INTERP_MAX, Math.max(INTERP_MIN, mean * 1.5 + jitter));
+  }
+
+  // Normalización v1.2 (SPEC E): el server omite campos en 0 (stun/kc/slide) y
+  // redondea a 1 decimal; el cliente asume 0 ante cualquier campo ausente.
+  const num = (v) => (typeof v === "number" && isFinite(v) ? v : 0);
+  // ball SIEMPRE objeto (nunca null): un state sin ball asume 0 como cualquier
+  // otro campo ausente (SPEC v1.2 "campos ausentes = 0") — sampleState interpola
+  // s0.ball/s1.ball sin guard y un null en el buffer tiraría TypeError por frame.
+  const mb = msg.ball || {};
+  const ball = { x: num(mb.x), y: num(mb.y), vx: num(mb.vx), vy: num(mb.vy) };
   const pm = new Map();
   if (Array.isArray(msg.players)) {
-    for (const p of msg.players) pm.set(p.id, p);
+    for (const p of msg.players) {
+      pm.set(p.id, {
+        id: p.id,
+        x: num(p.x),
+        y: num(p.y),
+        vx: num(p.vx),
+        vy: num(p.vy),
+        fx: num(p.fx),
+        fy: num(p.fy),
+        stun: num(p.stun),
+        kc: num(p.kc),
+        slide: num(p.slide),
+        // iq = último seq de input aplicado por el server al PROPIO jugador.
+        iq: typeof p.iq === "number" && isFinite(p.iq) ? p.iq : null,
+      });
+    }
   }
-  // Detección de eventos (patada / barrida / stun) comparando con el snapshot anterior.
+
+  // Detección de eventos (patada / barrida / stun) comparando con el snapshot
+  // anterior. Las acciones PROPIAS ya sonaron al presionar (feedback local v1.2):
+  // acá solo se disparan las ajenas para no duplicar SFX/anillo.
   const prev = snaps[snaps.length - 1];
   if (prev) {
     for (const [id, p] of pm) {
       const q = prev.players.get(id);
       if (!q) continue;
       if (p.kc > q.kc + 0.05) {
-        ringFx.push({ x: p.x, y: p.y, t });
-        sfxKick();
+        if (id !== myId) {
+          ringFx.push({ x: p.x, y: p.y, t });
+          sfxKick();
+        }
         // Squash de la pelota solo si la patada fue cerca de ella.
-        if (msg.ball && Math.hypot(msg.ball.x - p.x, msg.ball.y - p.y) < 70) {
+        if (ball && Math.hypot(ball.x - p.x, ball.y - p.y) < KICK_RANGE + BALL_R + 16) {
           lastKickT = t;
         }
       }
       const qSlide = q.slide || 0;
-      if ((p.slide || 0) > qSlide + 0.05) sfxTackle(); // arranque del slide
+      if ((p.slide || 0) > qSlide + 0.05 && id !== myId) sfxTackle(); // arranque del slide
       if (p.stun > q.stun + 0.05) {
         // Barrida que conecta: vibración si me la dieron a mí + relator.
         if (id === myId) vibrate(40);
@@ -1146,20 +1364,23 @@ function handleState(msg) {
       }
     }
     // Rebote contra pared (sfxBounce tiene su propio rate-limit de 90 ms).
-    if (msg.ball && prev.ball) {
-      const flippedX = msg.ball.vx * prev.ball.vx < 0;
-      const flippedY = msg.ball.vy * prev.ball.vy < 0;
+    if (ball && prev.ball) {
+      const flippedX = ball.vx * prev.ball.vx < 0;
+      const flippedY = ball.vy * prev.ball.vy < 0;
       if ((flippedX || flippedY) && Math.hypot(prev.ball.vx, prev.ball.vy) > 180) {
         sfxBounce();
       }
     }
   }
-  snaps.push({ t, ball: msg.ball, players: pm, paused: !!msg.paused });
+  snaps.push({ t, ball, players: pm, paused: !!msg.paused });
   if (snaps.length > 40) snaps.shift();
   if (Array.isArray(msg.scores)) updateScores(msg.scores);
 
   const me = pm.get(myId);
-  if (me && btnKick) btnKick.classList.toggle("cooldown", me.kc > 0.02);
+  if (me) {
+    reconcileSelf(me, !!msg.paused); // predicción + reconciliación (SPEC A)
+    if (btnKick) btnKick.classList.toggle("cooldown", me.kc > 0.02);
+  }
 }
 
 function handleGoal(msg) {
@@ -1249,8 +1470,11 @@ function handleGoal(msg) {
 
 function handleKickoff() {
   // Fin de la pausa post-gol: posiciones reseteadas → limpiar buffer para no
-  // interpolar el "teletransporte" a los spawns.
+  // interpolar el "teletransporte" a los spawns. La predicción también se
+  // resetea: el próximo state la re-inicializa desde el spawn (snap sin offset).
   snaps = [];
+  resetPrediction();
+  lastPaused = false;
   clearOverlayTimers();
   overlayEl.textContent = "";
 }
@@ -1416,25 +1640,112 @@ function currentInput() {
   return { mx: x, my: y };
 }
 
-// kick/tackle son edge-trigger: true solo en el mensaje del momento de presión.
-function sendInput(kick, tackle) {
+/* ---------------------- Envío de input v1.2 (SPEC A) ----------------------
+ * Único punto de salida de {type:"input", seq, mx, my, kick, tackle}:
+ * - INMEDIATO al cambiar el vector de movimiento o al presionar kick/tackle,
+ *   con cap de 60 msgs/s (INPUT_MIN_GAP_MS); si el cap pospone el envío, la
+ *   acción queda latcheada (queuedKick/queuedTackle) y el cambio lo reintenta
+ *   el próximo rAF o el keepalive.
+ * - keepalive a 20 Hz mientras se juega (el server necesita seq frescos).
+ * - seq incremental por conexión (arranca en 1); kick/tackle edge-trigger. */
+function flushInput(force) {
   if (phase !== "game" || ended || !ws || ws.readyState !== WebSocket.OPEN) return;
   const v = currentInput();
-  ws.send(JSON.stringify({ type: "input", mx: v.mx, my: v.my, kick: !!kick, tackle: !!tackle }));
+  const changed = v.mx !== lastSentMx || v.my !== lastSentMy;
+  if (!force && !changed && !queuedKick && !queuedTackle) return;
+  const now = performance.now();
+  if (now - lastInputSendT < INPUT_MIN_GAP_MS) return; // cap 60/s
+  inputSeq += 1;
+  ws.send(
+    JSON.stringify({
+      type: "input",
+      seq: inputSeq,
+      mx: v.mx,
+      my: v.my,
+      kick: queuedKick,
+      tackle: queuedTackle,
+    })
+  );
+  queuedKick = false;
+  queuedTackle = false;
+  lastSentMx = v.mx;
+  lastSentMy = v.my;
+  lastInputSendT = now;
+}
+
+// Feedback local INMEDIATO de la patada (SPEC A): anillo + SFX + squash al
+// presionar, sin esperar el round-trip. El server sigue siendo autoritativo
+// (con kick buffer de 160 ms); la detección de handleState saltea el propio id.
+function localKickFeedback() {
+  if (pred && (pred.stun > 0.01 || pred.slide > 0.01)) return; // sin control: no sonar en vano
+  const now = performance.now();
+  // Cooldown LOCAL (mismo patrón que tackleCdUntil): el kc del snapshot llega
+  // ~interpDelay + RTT/2 tarde, así que dos presses dentro de esa ventana harían
+  // sonar un kick fantasma que el server va a rechazar por KICK_COOLDOWN.
+  if (now < kickCdUntil) return;
+  const last = snaps.length ? snaps[snaps.length - 1] : null;
+  const meSnap = last ? last.players.get(myId) : null;
+  if (meSnap && meSnap.kc > 0.05) return; // todavía en cooldown conocido
+  sfxKick();
+  const px = pred ? pred.x + corrX : meSnap ? meSnap.x : null;
+  const py = pred ? pred.y + corrY : meSnap ? meSnap.y : null;
+  if (px !== null && py !== null) {
+    ringFx.push({ x: px, y: py, t: now });
+    // Squash de la pelota si está al alcance real de la patada (KICK_RANGE 44).
+    if (last && last.ball && Math.hypot(last.ball.x - px, last.ball.y - py) <= KICK_RANGE) {
+      lastKickT = now;
+      // La patada va a ejecutar de verdad en el server (pelota en rango): armar el
+      // cooldown local. Fuera de rango NO se arma (el server tampoco quema el kc:
+      // kick buffer 160 ms), para no silenciar un kick real posterior.
+      kickCdUntil = now + KICK_COOLDOWN * 1000;
+    }
+  }
+}
+
+// Feedback local INMEDIATO de la barrida: slide-whistle + polvito al presionar.
+function localTackleFeedback() {
+  const now = performance.now();
+  if (now < tackleCdUntil) return; // cooldown visual conocido
+  if (pred && (pred.stun > 0.01 || pred.slide > 0.01)) return;
+  sfxTackle();
+  tackleCdUntil = now + TACKLE_COOLDOWN * 1000;
+  if (pred) {
+    const n = Math.max(2, Math.round(4 * fxMult()));
+    for (let i = 0; i < n; i++) {
+      dustFx.push({
+        x: pred.x + corrX - pred.fx * 6 + (Math.random() - 0.5) * 8,
+        y: pred.y + corrY - pred.fy * 6 + (Math.random() - 0.5) * 8,
+        vx: -pred.fx * (40 + Math.random() * 50) + (Math.random() - 0.5) * 40,
+        vy: -pred.fy * (40 + Math.random() * 50) + (Math.random() - 0.5) * 40 - 14,
+        r: 2 + Math.random() * 2.6,
+        life: 0.45,
+        maxLife: 0.45,
+      });
+    }
+  }
 }
 
 function pressKick() {
-  sendInput(true, false);
+  if (phase !== "game" || ended) return;
+  localKickFeedback();
+  queuedKick = true;
+  flushInput(false);
 }
 
 function pressTackle() {
-  sendInput(false, true);
-  tackleCdUntil = performance.now() + TACKLE_COOLDOWN * 1000;
+  if (phase !== "game" || ended) return;
+  localTackleFeedback();
+  queuedTackle = true;
+  flushInput(false);
 }
 
 function startInputLoop() {
   stopInputLoop();
-  inputTimer = setInterval(() => sendInput(false, false), Math.round(1000 / INPUT_HZ));
+  // Keepalive a 20 Hz: manda aunque nada haya cambiado; si hubo un envío hace
+  // nada (cambio inmediato), solo flushea lo pendiente sin duplicar tráfico.
+  inputTimer = setInterval(() => {
+    flushInput(performance.now() - lastInputSendT >= KEEPALIVE_MS - 10);
+  }, KEEPALIVE_MS);
 }
 
 function stopInputLoop() {
@@ -1442,6 +1753,8 @@ function stopInputLoop() {
     clearInterval(inputTimer);
     inputTimer = 0;
   }
+  queuedKick = false;
+  queuedTackle = false;
   keys.clear();
   joyReset();
 }
@@ -1452,6 +1765,7 @@ window.addEventListener("keydown", (e) => {
   if (dir) {
     keys.add(dir);
     e.preventDefault();
+    flushInput(false); // input INMEDIATO al cambiar el movimiento (SPEC A)
     return;
   }
   if (e.repeat) return;
@@ -1466,10 +1780,16 @@ window.addEventListener("keydown", (e) => {
 
 window.addEventListener("keyup", (e) => {
   const dir = KEYMAP[e.code];
-  if (dir) keys.delete(dir);
+  if (dir) {
+    keys.delete(dir);
+    flushInput(false); // freno/cambio inmediato
+  }
 });
 
-window.addEventListener("blur", () => keys.clear());
+window.addEventListener("blur", () => {
+  keys.clear();
+  flushInput(false); // soltar todo al perder foco: avisar al server ya
+});
 
 /* ------------------------------ Joystick DINÁMICO ------------------------------ */
 // v1.1: el joystick aparece centrado donde el dedo toca la MITAD IZQUIERDA de la
@@ -1507,6 +1827,7 @@ function joyMove(t) {
   }
   joy.mx = dx / JOY_RADIUS;
   joy.my = dy / JOY_RADIUS;
+  flushInput(false); // input inmediato al mover el stick (cap 60/s adentro)
 }
 
 function joyReset() {
@@ -1557,7 +1878,7 @@ function joyEnd(e) {
   for (const t of e.changedTouches) {
     if (t.identifier === joy.id) {
       joyReset();
-      sendInput(false, false); // freno inmediato
+      flushInput(false); // freno inmediato
     }
   }
 }
@@ -1681,6 +2002,9 @@ function ensureAudio() {
       masterGain = audioCtx.createGain();
       masterGain.gain.value = masterVol();
       masterGain.connect(audioCtx.destination);
+      // Clips del pack de voz bajados antes de que existiera el contexto
+      // (decodeAudioData lo necesita): decodificarlos ahora (v1.2, SPEC D).
+      voicePackDecodePending();
     }
   } catch (err) {
     audioCtx = null;
@@ -1977,8 +2301,11 @@ function relatorSay(text, prio, rate, pitch) {
   if (!settings.relator) return;
   if (!("speechSynthesis" in window)) return;
   const nowMs = performance.now();
+  // speakUntil/speakPrio también los setea un clip del pack en curso (v1.2):
+  // la síntesis no habla encima de un clip de prioridad mayor.
   if (nowMs < speakUntil && prio < speakPrio) return;
   try {
+    voiceClipStop(); // no solapar la síntesis con un clip del pack (SPEC D)
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     if (!relatorVoice) relatorVoice = pickRelatorVoice();
@@ -2003,6 +2330,7 @@ function relatorSay(text, prio, rate, pitch) {
 }
 
 function relatorStop() {
+  voiceClipStop(); // v1.2: también corta el clip del pack en curso
   speakUntil = 0;
   speakPrio = 0;
   try {
@@ -2019,6 +2347,19 @@ function pickPhrase(arr) {
 function commentator(event, data) {
   if (!settings.relator) return;
   const d = data || {};
+  // v1.2 (SPEC D): primero el pack de voz REAL, mapeando los MISMOS eventos del
+  // sintético: "gameover" → "win"; un gol con racha ≥ 2 prefiere "streak" y cae
+  // a "goal" si el pack no lo trae. Si el pack no cubre el evento (sin manifest,
+  // evento ausente o todos sus archivos fallaron) → síntesis SOLO para este.
+  const packEvents =
+    event === "gameover"
+      ? ["win"]
+      : event === "goal" && typeof d.streak === "number" && d.streak >= 2
+        ? ["streak", "goal"]
+        : [event];
+  for (const pe of packEvents) {
+    if (voicePackSay(pe)) return; // sonando (o descartado por no-solapado)
+  }
   const name = typeof d.name === "string" ? d.name : "";
   const rival = typeof d.rival === "string" ? d.rival : "";
   let text = "";
@@ -2086,10 +2427,397 @@ function commentator(event, data) {
   if (text) relatorSay(text, prio, rate, pitch);
 }
 
-/* ============================ Interpolación (100 ms) ============================ */
+/* ==================== Relator — packs de voz reales (v1.2, SPEC D) ====================
+ * Si existe public/voices/manifest.json el relator usa AUDIO REAL: el manifest
+ * se baja UNA sola vez al entrar al juego (404 silencioso → sintético) y cada
+ * clip se pre-carga fetch → ArrayBuffer → decodeAudioData → AudioBuffer. La
+ * reproducción sale por el masterGain (respeta volumen/mute EN VIVO, como los
+ * sfx). Eventos del manifest: start / goal / owngoal / tackle / streak / win.
+ * Dentro de un evento se elige un clip AL AZAR (sin repetir el último si hay
+ * 2+). No-solapado (SPEC D): si hay un relato sonando (clip o síntesis), el
+ * clip nuevo solo lo reemplaza si es de la familia de gol o el campeón
+ * ("goal"/"win"; owngoal y streak son variantes del evento de gol) y no pisa
+ * uno de prioridad mayor; si no, se DESCARTA sin fallback (ya hay relato).
+ * Si el pack no tiene un evento o ninguno de sus archivos cargó/decodificó:
+ * fallback al relator speechSynthesis v1.1 SOLO para ese evento. */
+
+const VOICE_EVENTS = ["start", "goal", "owngoal", "tackle", "streak", "win"];
+// Eventos que pueden pisar un relato en curso (familia de gol + campeón).
+const VOICE_REPLACERS = { goal: true, owngoal: true, streak: true, win: true };
+// Prioridades espejo de las del relator sintético (coordinan pack ↔ síntesis).
+const VOICE_PRIO = { start: 2, goal: 3, owngoal: 3, streak: 3, tackle: 1, win: 4 };
+
+let voicePackState = "idle"; // "idle" | "loading" | "ready" | "none" (= sintético)
+let voicePackName = "";      // manifest.name (para #relator-pack-label)
+let voicePackEvents = null;  // { evento: [{ file, raw, buffer, failed }] }
+let voiceClipSource = null;  // AudioBufferSourceNode del clip sonando (o null)
+let voiceClipUntil = 0;      // performance.now() en que termina el clip en curso
+const voiceLastIdx = {};     // último índice elegido por evento (evita repetir)
+
+// Carga única del pack ("al entrar al juego": handleStarting/handleStart la
+// llaman; el estado la hace idempotente). Cualquier falla global ⇒ "none".
+function loadVoicePack() {
+  if (voicePackState !== "idle") return;
+  if (typeof fetch !== "function") {
+    voicePackState = "none";
+    return;
+  }
+  voicePackState = "loading";
+  fetch("voices/manifest.json")
+    .then((res) => {
+      if (!res.ok) throw new Error("sin manifest"); // 404 silencioso → sintético
+      return res.json();
+    })
+    .then((manifest) => {
+      const events =
+        manifest &&
+        typeof manifest === "object" &&
+        manifest.events &&
+        typeof manifest.events === "object"
+          ? manifest.events
+          : null;
+      if (!events) throw new Error("manifest inválido");
+      voicePackName =
+        typeof manifest.name === "string" && manifest.name.trim()
+          ? manifest.name.trim().slice(0, 40)
+          : "Pack de voz";
+      voicePackEvents = {};
+      const jobs = [];
+      for (const ev of VOICE_EVENTS) {
+        const files = Array.isArray(events[ev]) ? events[ev] : [];
+        const clips = [];
+        for (const file of files) {
+          if (typeof file !== "string" || !file) continue;
+          const clip = { file, raw: null, buffer: null, failed: false };
+          clips.push(clip);
+          jobs.push(
+            fetch("voices/" + file)
+              .then((r) => {
+                if (!r.ok) throw new Error("audio " + r.status);
+                return r.arrayBuffer();
+              })
+              .then((raw) => {
+                clip.raw = raw;
+                return voiceDecodeClip(clip); // decodifica ya si hay AudioContext
+              })
+              .catch(() => {
+                clip.failed = true; // ESTE archivo falla → fallback solo de él
+              })
+          );
+        }
+        if (clips.length) voicePackEvents[ev] = clips;
+      }
+      if (!jobs.length) throw new Error("manifest sin clips");
+      return Promise.all(jobs);
+    })
+    .then(voicePackFinalize)
+    .catch(() => {
+      // Sin manifest / JSON roto / sin clips: relator sintético, sin ruido.
+      voicePackEvents = null;
+      voicePackName = "";
+      voicePackState = "none";
+      updateRelatorPackLabel();
+    });
+}
+
+// ArrayBuffer → AudioBuffer. Necesita audioCtx: si aún no existe, el raw queda
+// guardado y voicePackDecodePending() lo decodifica al crearse el contexto.
+function voiceDecodeClip(clip) {
+  if (!audioCtx || !clip.raw || clip.buffer || clip.failed) return Promise.resolve();
+  const raw = clip.raw;
+  clip.raw = null; // decodeAudioData detacha el buffer: una sola chance
+  return new Promise((resolve) => {
+    const ok = (buf) => {
+      if (buf) clip.buffer = buf;
+      resolve();
+    };
+    const fail = () => {
+      clip.failed = true;
+      resolve();
+    };
+    try {
+      // Forma con callbacks (Safari viejo) + promesa (browsers modernos).
+      const p = audioCtx.decodeAudioData(raw, ok, fail);
+      if (p && typeof p.then === "function") p.then(ok, fail);
+    } catch (err) {
+      fail();
+    }
+  });
+}
+
+// Decodifica los clips que quedaron en raw por no haber AudioContext todavía.
+// La llama ensureAudio() al crear el contexto (primer gesto del usuario).
+function voicePackDecodePending() {
+  if (!voicePackEvents || !audioCtx) return;
+  const jobs = [];
+  for (const ev in voicePackEvents) {
+    for (const clip of voicePackEvents[ev]) jobs.push(voiceDecodeClip(clip));
+  }
+  // Si la carga ya cerró ("ready"), re-evaluar al terminar (raws → buffers o
+  // failed). Si sigue "loading", el finalize de loadVoicePack se encarga.
+  if (voicePackState === "ready" && jobs.length) {
+    Promise.all(jobs).then(voicePackFinalize);
+  }
+}
+
+// Estado final del pack: "ready" si quedó algún clip usable (decodificado o
+// pendiente de decodificar por falta de contexto), "none" si fallaron todos.
+function voicePackFinalize() {
+  let usable = false;
+  if (voicePackEvents) {
+    for (const ev in voicePackEvents) {
+      for (const clip of voicePackEvents[ev]) {
+        if (clip.buffer || clip.raw) usable = true;
+      }
+    }
+  }
+  voicePackState = usable ? "ready" : "none";
+  updateRelatorPackLabel();
+}
+
+// Corta el clip del pack en curso (relatorStop, relatorSay y voicePackSay).
+function voiceClipStop() {
+  if (voiceClipSource) {
+    const src = voiceClipSource;
+    voiceClipSource = null; // antes de stop(): que su onended no pise estado ajeno
+    try {
+      src.stop();
+    } catch (err) {
+      /* ya parado */
+    }
+  }
+  voiceClipUntil = 0;
+}
+
+// #relator-pack-label (opciones, SPEC D/F): nombre del pack o "Voz sintética".
+function updateRelatorPackLabel() {
+  if (!relatorPackLabel) return;
+  relatorPackLabel.textContent =
+    voicePackState === "ready" && voicePackName ? voicePackName : "Voz sintética";
+}
+
+// Intenta relatar `event` con el pack. true ⇒ el evento quedó CUBIERTO por el
+// pack (clip sonando, o descartado por la política de no-solapado: NO hablar
+// síntesis encima). false ⇒ usar el fallback sintético para este evento.
+function voicePackSay(event) {
+  if (voicePackState !== "ready" || !voicePackEvents) return false;
+  if (!audioCtx || !masterGain) return false; // sin WebAudio no hay clips
+  const all = voicePackEvents[event];
+  if (!all || !all.length) return false; // el pack no trae este evento
+  const clips = all.filter((c) => c.buffer);
+  if (!clips.length) {
+    voicePackDecodePending(); // por si quedaron raws sin decodificar
+    return false; // (todavía) sin audio usable para este evento → sintético
+  }
+  const prio = VOICE_PRIO[event] || 1;
+  const nowMs = performance.now();
+  const sounding = (voiceClipSource && nowMs < voiceClipUntil) || nowMs < speakUntil;
+  // No-solapado (SPEC D): solo gol/campeón pisan un relato en curso, y nunca
+  // a uno de prioridad mayor (un gol no corta el relato del campeón).
+  if (sounding && (!VOICE_REPLACERS[event] || prio < speakPrio)) return true;
+
+  // Clip al azar dentro del evento (sin repetir el último si hay más de uno).
+  let idx = Math.floor(Math.random() * clips.length);
+  if (clips.length > 1 && idx === voiceLastIdx[event]) idx = (idx + 1) % clips.length;
+  voiceLastIdx[event] = idx;
+  const buffer = clips[idx].buffer;
+
+  voiceClipStop();
+  try {
+    if ("speechSynthesis" in window) speechSynthesis.cancel(); // corta la síntesis
+  } catch (err) {
+    /* ignorar */
+  }
+  try {
+    const src = audioCtx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(masterGain); // volumen/mute de opciones EN VIVO (SPEC D)
+    src.onended = () => {
+      if (voiceClipSource === src) {
+        voiceClipSource = null;
+        voiceClipUntil = 0;
+        speakUntil = 0; // libera el "canal" del relator para los que siguen
+        speakPrio = 0;
+      }
+    };
+    src.start();
+    voiceClipSource = src;
+    voiceClipUntil = nowMs + buffer.duration * 1000 + 80;
+    speakPrio = prio; // síntesis y próximos clips respetan este relato
+    speakUntil = voiceClipUntil;
+  } catch (err) {
+    voiceClipSource = null;
+    voiceClipUntil = 0;
+    return false; // no se pudo reproducir → que hable la síntesis
+  }
+  return true;
+}
+
+/* ================= Predicción del PROPIO jugador (v1.2, SPEC A) =================
+ * El propio jugador se simula LOCALMENTE con la física exacta del server
+ * (tickRoom): ACCEL/FRICTION/MAX_SPEED del estadio + confinamiento contra todas
+ * las paredes; stun y slide bloquean el control. Cada frame del rAF integra con
+ * dt real y registra {seq, mx, my, dt} en pendingInputs. Al llegar un state se
+ * parte del estado autoritativo (pos/vel + iq), se descartan los pendientes ya
+ * aplicados (seq ≤ iq) y se re-simulan los restantes. El render del propio
+ * jugador usa SIEMPRE pred + offset de corrección (decae ~120 ms, snap > 80 u). */
+
+// Constantes efectivas de física del estadio (= stadiumPhysics del server con la
+// base v1.2): solo "nieve" toca el movimiento del jugador (ACCEL×0.55, FRICTION×0.45).
+function clientStadiumPhys(stadium) {
+  if (stadium === "nieve") return { accel: ACCEL * 0.55, friction: FRICTION * 0.45 };
+  return { accel: ACCEL, friction: FRICTION };
+}
+
+// Un paso de simulación del propio jugador — COPIA de tickRoom (server.js):
+// mismo orden (stun → slide/aceleración/fricción → integración → confinamiento).
+function simSelfStep(b, mx, my, dt, paused) {
+  const stunned = b.stun > 0;
+  if (stunned) b.stun = Math.max(0, b.stun - dt);
+  // Durante la pausa post-gol la física queda congelada (el stun sí corre).
+  if (paused || !match) return;
+
+  if (stunned && b.slide > 0) b.slide = 0; // el stun corta el slide propio
+
+  if (b.slide > 0) {
+    // Slide: velocidad fija hacia la dirección de barrida, sin control.
+    b.vx = b.sdx * SLIDE_SPEED;
+    b.vy = b.sdy * SLIDE_SPEED;
+    b.slide = Math.max(0, b.slide - dt);
+  } else {
+    // El server clampa y normaliza el input si |v| > 1 (guard anti-NaN incluido).
+    let ix = isFinite(mx) ? mx : 0;
+    let iy = isFinite(my) ? my : 0;
+    const ilen = Math.hypot(ix, iy);
+    if (ilen > 1) {
+      ix /= ilen;
+      iy /= ilen;
+    }
+    // facing = último input de movimiento no nulo (server lo fija en handleInput
+    // SIN chequear stun — solo el slide lo congela, y esta rama ya es slide ≤ 0):
+    // se actualiza también stunned para que la cuña/botines no diverjan del server.
+    if (ilen > 1e-9) {
+      const l = Math.hypot(ix, iy);
+      b.fx = ix / l;
+      b.fy = iy / l;
+    }
+    if (!stunned && ilen > 1e-9) {
+      b.vx += ix * match.phys.accel * dt;
+      b.vy += iy * match.phys.accel * dt;
+      const sp = Math.hypot(b.vx, b.vy);
+      if (sp > MAX_SPEED) {
+        // Por encima de MAX_SPEED (knockback/slide) decae con la fricción del
+        // estadio hasta MAX_SPEED en vez de recortarse de golpe (= server).
+        const target = Math.max(MAX_SPEED, sp * Math.exp(-match.phys.friction * dt));
+        b.vx *= target / sp;
+        b.vy *= target / sp;
+      }
+    } else {
+      const f = Math.exp(-match.phys.friction * dt);
+      b.vx *= f;
+      b.vy *= f;
+    }
+  }
+
+  b.x += b.vx * dt;
+  b.y += b.vy * dt;
+
+  // Confinamiento a la cancha: desliza contra TODAS las paredes, arcos incluidos.
+  for (const w of match.walls) {
+    const d = (b.x - w.cx) * w.nx + (b.y - w.cy) * w.ny;
+    if (d > -PLAYER_R) {
+      b.x -= w.nx * (d + PLAYER_R);
+      b.y -= w.ny * (d + PLAYER_R);
+      const vn = b.vx * w.nx + b.vy * w.ny;
+      if (vn > 0) {
+        b.vx -= w.nx * vn;
+        b.vy -= w.ny * vn;
+      }
+    }
+  }
+}
+
+// Reconciliación al llegar un state (SPEC A): estado server del propio jugador
+// + iq → descartar pendientes acked → re-simular los restantes → nueva pred.
+// La diferencia con el render anterior se absorbe con corrX/corrY.
+function reconcileSelf(me, paused) {
+  lastPaused = paused;
+  // iq = último seq aplicado por el server. Si faltara (server viejo), se da
+  // todo por aplicado: pred sigue al server y el offset suaviza el resto.
+  const acked = me.iq !== null ? me.iq : inputSeq;
+  while (pendingInputs.length && pendingInputs[0].seq <= acked) pendingInputs.shift();
+
+  const hadPred = pred !== null;
+  const prevRX = hadPred ? pred.x + corrX : 0;
+  const prevRY = hadPred ? pred.y + corrY : 0;
+
+  const sim = {
+    x: me.x,
+    y: me.y,
+    vx: me.vx,
+    vy: me.vy,
+    fx: me.fx,
+    fy: me.fy,
+    stun: me.stun,
+    slide: me.slide,
+    // Durante el slide el facing quedó fijo en la dirección de barrida (server).
+    sdx: me.fx,
+    sdy: me.fy,
+  };
+  for (const pi of pendingInputs) simSelfStep(sim, pi.mx, pi.my, pi.dt, paused);
+  pred = sim;
+
+  if (hadPred) {
+    // Suavizado: offset = render anterior − predicción nueva; decae ~120 ms.
+    corrX = prevRX - sim.x;
+    corrY = prevRY - sim.y;
+    if (Math.hypot(corrX, corrY) > CORR_SNAP) {
+      corrX = 0; // corrección enorme (teleport/lag spike): snap directo
+      corrY = 0;
+    }
+  } else {
+    corrX = 0;
+    corrY = 0;
+  }
+}
+
+// Avance de la predicción en cada frame del rAF (dt real, SPEC A).
+function updatePrediction(dt) {
+  if (!match || phase !== "game") return;
+  flushInput(false); // reintento de cambios/acciones que el cap de 60/s pospuso
+  if (!pred || ended) return;
+  const v = currentInput();
+  pendingInputs.push({ seq: inputSeq, mx: v.mx, my: v.my, dt });
+  if (pendingInputs.length > PENDING_MAX) {
+    pendingInputs.splice(0, pendingInputs.length - PENDING_MAX);
+  }
+  simSelfStep(pred, v.mx, v.my, dt, lastPaused);
+  // El offset de corrección decae exponencialmente a 0 en ~120 ms.
+  const k = Math.exp(-CORR_DECAY * dt);
+  corrX *= k;
+  corrY *= k;
+  if (Math.abs(corrX) < 0.01) corrX = 0;
+  if (Math.abs(corrY) < 0.01) corrY = 0;
+}
+
+// Reset de la predicción (start/kickoff/salida): el próximo state la
+// re-inicializa desde el estado autoritativo, sin offset (snap limpio).
+function resetPrediction() {
+  pred = null;
+  pendingInputs = [];
+  corrX = 0;
+  corrY = 0;
+  queuedKick = false;
+  queuedTackle = false;
+}
+
+/* ==================== Interpolación (delay adaptativo, v1.2) ==================== */
+// Pelota y RIVALES se renderizan interpDelay ms en el pasado interpolando entre
+// snapshots (50–160 ms según snapInterval + jitter). El PROPIO jugador NO: su
+// pose sale de la predicción (pred + corr), siempre fresca.
 function sampleState() {
   if (!snaps.length) return null;
-  const rt = performance.now() - INTERP_DELAY;
+  const rt = performance.now() - interpDelay;
   let s0 = snaps[0];
   let s1 = snaps[0];
   if (rt >= snaps[snaps.length - 1].t) {
@@ -2121,6 +2849,19 @@ function sampleState() {
       slide: p1.slide || 0, // v1.1: s restantes de barrida (0 si no)
     });
   }
+
+  // El RENDER del PROPIO jugador usa SIEMPRE la predicción (SPEC A): posición
+  // pred + offset de corrección y facing local (respuesta inmediata al input).
+  const self = players.get(myId);
+  if (self && pred) {
+    self.x = pred.x + corrX;
+    self.y = pred.y + corrY;
+    self.fx = pred.fx;
+    self.fy = pred.fy;
+    self.stun = pred.stun;
+    self.slide = pred.slide;
+  }
+
   return {
     ball: {
       x: L(s0.ball.x, s1.ball.x),
@@ -2829,6 +3570,9 @@ function frame(now) {
   const dt = Math.min(0.05, (now - lastFrameT) / 1000);
   lastFrameT = now;
   if (phase !== "game" || !match) return;
+
+  // Predicción del propio jugador con dt real + flush de inputs pospuestos (v1.2).
+  updatePrediction(dt);
 
   const dpr = resizeCanvas();
   const W = canvas.width;

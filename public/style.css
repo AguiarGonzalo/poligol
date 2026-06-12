@@ -2300,3 +2300,161 @@ body.in-game .gear-btn-global {
     font-size: 1.3rem;
   }
 }
+
+/* ============================================================
+   ============================================================
+   v1.2 — Ping, hint de visibilidad, pack del relator, "Tu sala"
+   ============================================================
+   ============================================================ */
+
+/* ---------- Hint fijo bajo el segmented de visibilidad (home) ---------- */
+.field-hint {
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--ink-faint);
+}
+
+/* ---------- Indicador de ping (#ping-indicator, dentro de #screen-game) ----------
+   client.js setea el texto ("XX ms") y togglea UNA de .ping-good/.ping-mid/.ping-bad.
+   El puntito de color lo dibuja CSS (::before): NO insertar un span propio. */
+.ping-indicator {
+  position: absolute;
+  right: calc(12px + env(safe-area-inset-right, 0px));
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  z-index: 15; /* sobre el canvas, debajo de overlay (20) y controles (25) */
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-dim);
+  background: rgba(10, 15, 30, 0.55);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  pointer-events: none; /* jamás roba toques al canvas ni a los controles */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Sin medición todavía (hasta el primer pong) no se muestra nada */
+.ping-indicator:empty {
+  display: none;
+}
+
+/* Puntito de color */
+.ping-indicator::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--ink-faint);
+}
+
+.ping-indicator.ping-good::before {
+  background: var(--grass);
+  box-shadow: 0 0 6px rgba(52, 199, 89, 0.8);
+}
+
+.ping-indicator.ping-mid::before {
+  background: var(--gold);
+  box-shadow: 0 0 6px rgba(245, 197, 66, 0.8);
+}
+
+.ping-indicator.ping-bad::before {
+  background: var(--danger);
+  box-shadow: 0 0 6px rgba(255, 93, 93, 0.8);
+}
+
+.ping-indicator.ping-bad {
+  color: #ffb3b3;
+}
+
+/* ---------- Nombre del pack del relator (modal de opciones) ---------- */
+.relator-pack-label {
+  margin: -7px 2px 0; /* se "pega" bajo la fila Relator (gap 13px de .options-card) */
+  padding: 0 14px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--ink-faint);
+  text-align: left;
+}
+
+/* ---------- Badge "Tu sala" en la lista de salas públicas ----------
+   client.js solo agrega la clase .mine a la .room-card propia;
+   el badge lo dibuja CSS (::after): NO insertar un chip extra. */
+.room-card.mine {
+  position: relative;
+  border-color: rgba(245, 197, 66, 0.5);
+  background: rgba(245, 197, 66, 0.06);
+}
+
+.room-card.mine:hover {
+  border-color: rgba(245, 197, 66, 0.75);
+}
+
+.room-card.mine::after {
+  content: "Tu sala";
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  padding: 3px 10px;
+  border-radius: 0 var(--radius-md) 0 var(--radius-sm);
+  font-size: 0.58rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #2a1f02;
+  background: linear-gradient(160deg, var(--gold-2), var(--gold-deep));
+  box-shadow: 0 2px 8px rgba(245, 197, 66, 0.35);
+  pointer-events: none;
+}
+
+/* ---------- Responsive v1.2 (después de las bases para ganar el cascade) ---------- */
+
+/* Táctil: la pill sube por ENCIMA de los botones ⚽/🦵 (no los tapa) */
+@media (pointer: coarse) {
+  .ping-indicator {
+    right: calc(14px + env(safe-area-inset-right, 0px));
+    bottom: calc(128px + env(safe-area-inset-bottom, 0px)); /* kick: bottom 30 + 88 de alto + aire */
+  }
+}
+
+@media (max-height: 560px) and (pointer: coarse) {
+  .ping-indicator {
+    bottom: calc(102px + env(safe-area-inset-bottom, 0px)); /* kick: bottom 20 + 72 */
+  }
+}
+
+/* Landscape bajo (el partido en móvil se juega así) */
+@media (orientation: landscape) and (max-height: 480px) {
+  .ping-indicator {
+    font-size: 0.62rem;
+    padding: 3px 8px;
+    right: calc(10px + env(safe-area-inset-right, 0px));
+    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .field-hint {
+    font-size: 0.64rem;
+  }
+
+  .relator-pack-label {
+    margin-top: -4px; /* gap de .options-card baja a 8px en este media */
+    font-size: 0.66rem;
+  }
+}
+
+/* Landscape bajo + táctil: por encima de los botones compactos */
+@media (orientation: landscape) and (max-height: 480px) and (pointer: coarse) {
+  .ping-indicator {
+    bottom: calc(86px + env(safe-area-inset-bottom, 0px)); /* kick: bottom 14 + 64 */
+  }
+}

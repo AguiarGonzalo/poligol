@@ -50,6 +50,7 @@
               <input class="seg-input" type="radio" id="vis-private" name="visibility" value="private" checked>
               <label class="seg-label" for="vis-private">🔒 Privada</label>
             </div>
+            <p class="field-hint">Pública: aparece en la lista para cualquiera · Privada: solo con el código</p>
           </div>
 
           <div class="home-actions">
@@ -169,6 +170,8 @@
         </div>
       </div>
 
+      <div id="ping-indicator" class="ping-indicator" aria-hidden="true"></div>
+
       <div id="rotate-overlay" class="rotate-overlay hidden">
         <div class="rotate-inner">
           <div class="rotate-icon" aria-hidden="true">📱↻</div>
@@ -192,6 +195,7 @@
           <label class="opt-label" for="opt-relator">🎙️ Relator</label>
           <input id="opt-relator" class="opt-check" type="checkbox" checked>
         </div>
+        <p id="relator-pack-label" class="relator-pack-label">Voz sintética</p>
 
         <div class="opt-row">
           <label class="opt-label" for="opt-fx">✨ Efectos</label>

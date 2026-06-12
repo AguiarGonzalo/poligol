@@ -1,3 +1,7 @@
 node_modules/
 .DS_Store
 npm-debug.log*
+
+# Packs de voz del usuario (SPEC v1.2 D): solo se versiona el README.
+public/voices/*
+!public/voices/README.md
