@@ -883,3 +883,50 @@ extiende la predicción v1.2 (que solo predecía el cuerpo propio) a **mundo com
   al acercarse a la pelota) para ejercitar el nuevo camino.
 - Mantener /health, /metrics (+bodies), salas públicas por push, packs de voz, predicción
   reconciliada (ahora de mundo completo), modos y objetivo de partido.
+
+---
+
+# v1.6 — UX/UI, consistencia, relator y mobile (cambios SOLO de cliente; sin cambios de protocolo)
+
+Repaso de menús y consistencia. No toca server.js ni el protocolo WS; es index.html +
+style.css + client.js.
+
+## A. Home con pestañas de acción
+
+El home agrupa las acciones en un segmented `#tab-create` / `#tab-join` / `#tab-train`
+(name="home-action"). Identidad arriba (nombre + país, siempre necesarios). Solo se muestra
+el panel de la acción elegida (`#panel-create` / `#panel-join` / `#panel-train`; los otros con
+`.hidden`):
+- Crear: `#room-name-input` + visibilidad (`#vis-public`/`#vis-private`) + `#btn-create`.
+- Unirse: `#room-input` + `#btn-join` (la lista de salas públicas sigue siendo el otro camino).
+- Entrenar: blurb + `#btn-train`.
+Esto saca de contexto los campos de "crear sala" cuando querés unirte/entrenar y acorta el
+home en mobile. `activeHomeTab()` / `setHomeTab(tab)` togglean los paneles; Enter en el nombre
+dispara la acción de la pestaña activa.
+
+## B. Relator: SIN voz sintética (se eliminó speechSynthesis)
+
+Se eliminó por completo el relator de voz sintética (sonaba robótico). `commentator()` solo
+reproduce si hay un PACK DE VOZ REAL cargado (`voicePackState === "ready"`); sin pack: silencio
+(los SFX de WebAudio siguen igual). Se borraron `relatorSay`/`pickRelatorVoice` y la init de
+speechSynthesis. La fila Relator del modal de opciones (`#relator-setting`) solo se muestra si
+hay pack (con su nombre); sin pack queda oculta. El sistema de packs (`public/voices/` +
+manifest.json) queda intacto para quien quiera poner voces reales/licenciadas propias.
+
+## C. Entrenamiento en dúo
+
+El modo entrenamiento (client-side) soporta controlar 1 o 2 cuerpos. Selector en el HUD
+(`.th-bodies` data-bodies 1|2). En dúo el `match.mode` del entrenamiento pasa a `"duo"`
+(⇒ `isDuo()` ⇒ doble joystick/teclas A·B, halos A dorado / B "②", ⚽/🦵 ocultos), con 2 cuerpos
+propios `me_a`/`me_b` (owner "me", slots 0/1). `buildTrainingMatch(name,country,defenders,
+stadium,duo)`, `trainingTick` arma inputs por slot para cada cuerpo propio, `rebuildTraining()`
+rearma conservando goles. Bug corregido: `onTrainingGoal` ya no asume un cuerpo con id "me"
+(en dúo son me_a/me_b).
+
+## D. Consistencia y mobile
+
+- Lobby: toggle de barrida con label a la izquierda y switch a la derecha (consistente con el
+  modal); opción de modo "🎮 Dúo (2 c/u)" (sin truncar); botón WhatsApp "💬 WhatsApp".
+- Opciones: "⚡ Respuesta" (antes "Predicción ≈ ½ RTT") con texto "Automática (recomendada)".
+- Mobile: el home más corto por las pestañas; HUD de entrenamiento compacto en landscape
+  (`@media (max-height:460px)` oculta la ayuda); todo verificado en preview mobile/landscape.

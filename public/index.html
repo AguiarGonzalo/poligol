@@ -25,7 +25,7 @@
         <div class="home-card glass">
           <header class="home-header">
             <h1 class="game-title">⚽ <span class="title-grad">PoliGol</span></h1>
-            <p class="game-tagline">Fútbol multijugador en cancha poligonal · primero a 3 gana</p>
+            <p class="game-tagline">Fútbol multijugador en cancha poligonal · rápido y sin delay</p>
           </header>
 
           <div class="field">
@@ -39,38 +39,60 @@
             <div id="country-grid" class="country-grid" role="listbox" aria-labelledby="country-grid-label"></div>
           </div>
 
+          <!-- Selector de acción: cada panel muestra SOLO los campos de esa acción
+               (crear / unirse / entrenar) para que nada esté fuera de contexto. -->
           <div class="field">
-            <label class="field-label" for="room-name-input">Nombre de tu sala</label>
-            <input id="room-name-input" class="text-input" type="text" placeholder="Sala de…"
-                   maxlength="24" autocomplete="off" spellcheck="false">
-          </div>
-
-          <div class="field">
-            <p class="field-label" id="visibility-label">Visibilidad</p>
-            <div class="segmented" role="radiogroup" aria-labelledby="visibility-label">
-              <input class="seg-input" type="radio" id="vis-public" name="visibility" value="public">
-              <label class="seg-label" for="vis-public">🌐 Pública</label>
-              <input class="seg-input" type="radio" id="vis-private" name="visibility" value="private" checked>
-              <label class="seg-label" for="vis-private">🔒 Privada</label>
+            <p class="field-label" id="action-label">¿Qué querés hacer?</p>
+            <div class="segmented home-tabs" role="tablist" aria-labelledby="action-label">
+              <input class="seg-input" type="radio" id="tab-create" name="home-action" value="create" checked>
+              <label class="seg-label" for="tab-create" role="tab">⚽ Crear</label>
+              <input class="seg-input" type="radio" id="tab-join" name="home-action" value="join">
+              <label class="seg-label" for="tab-join" role="tab">🔑 Unirse</label>
+              <input class="seg-input" type="radio" id="tab-train" name="home-action" value="train">
+              <label class="seg-label" for="tab-train" role="tab">🎯 Entrenar</label>
             </div>
-            <p class="field-hint">Pública: aparece en la lista para cualquiera · Privada: solo con el código</p>
           </div>
 
           <div class="home-actions">
-            <button id="btn-create" class="btn btn-primary btn-block" type="button">Crear sala</button>
-
-            <div class="divider" aria-hidden="true"><span>o unite con un código</span></div>
-
-            <div class="join-row">
-              <input id="room-input" class="text-input room-input" type="text" placeholder="CÓDIGO"
-                     maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false"
-                     aria-label="Código de sala (4 letras)">
-              <button id="btn-join" class="btn btn-secondary" type="button">Unirse</button>
+            <!-- CREAR -->
+            <div id="panel-create" class="action-panel">
+              <div class="field">
+                <label class="field-label" for="room-name-input">Nombre de tu sala</label>
+                <input id="room-name-input" class="text-input" type="text" placeholder="Sala de…"
+                       maxlength="24" autocomplete="off" spellcheck="false">
+              </div>
+              <div class="field">
+                <p class="field-label" id="visibility-label">Visibilidad</p>
+                <div class="segmented" role="radiogroup" aria-labelledby="visibility-label">
+                  <input class="seg-input" type="radio" id="vis-public" name="visibility" value="public">
+                  <label class="seg-label" for="vis-public">🌐 Pública</label>
+                  <input class="seg-input" type="radio" id="vis-private" name="visibility" value="private" checked>
+                  <label class="seg-label" for="vis-private">🔒 Privada</label>
+                </div>
+                <p class="field-hint">Pública: aparece en la lista para cualquiera · Privada: solo con el código</p>
+              </div>
+              <button id="btn-create" class="btn btn-primary btn-block" type="button">Crear sala</button>
             </div>
 
-            <div class="divider" aria-hidden="true"><span>o practicá</span></div>
+            <!-- UNIRSE -->
+            <div id="panel-join" class="action-panel hidden">
+              <div class="field">
+                <label class="field-label" for="room-input">Código de sala</label>
+                <div class="join-row">
+                  <input id="room-input" class="text-input room-input" type="text" placeholder="CÓDIGO"
+                         maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false"
+                         aria-label="Código de sala (4 letras)">
+                  <button id="btn-join" class="btn btn-secondary" type="button">Unirse</button>
+                </div>
+                <p class="field-hint">¿No tenés código? Tocá una sala pública de la lista.</p>
+              </div>
+            </div>
 
-            <button id="btn-train" class="btn btn-ghost btn-block" type="button">🎯 Entrenar solo</button>
+            <!-- ENTRENAR -->
+            <div id="panel-train" class="action-panel hidden">
+              <p class="field-hint train-blurb">Practicá solo al instante, sin esperar a nadie — con rivales de la máquina opcionales. Ideal para agarrarle la mano al control y a la pelota.</p>
+              <button id="btn-train" class="btn btn-primary btn-block" type="button">🎯 Empezar a entrenar</button>
+            </div>
           </div>
         </div>
 
@@ -108,7 +130,7 @@
               <option value="ffa">⚔️ Todos contra todos</option>
               <option value="1v1">🥊 1 vs 1</option>
               <option value="2v2">🤝 2 vs 2</option>
-              <option value="duo">🎮 Dúo (2 jugadores c/u)</option>
+              <option value="duo">🎮 Dúo (2 c/u)</option>
             </select>
           </div>
           <div class="config-field">
@@ -139,8 +161,8 @@
                juego es "HaxBall puro" — el cliente oculta los controles de barrida. -->
           <div class="config-field config-field-rule">
             <label class="rule-toggle">
-              <input id="rule-tackles" class="opt-check" type="checkbox" checked>
               <span class="field-label">🦵 Barrida</span>
+              <input id="rule-tackles" class="opt-check" type="checkbox" checked>
             </label>
           </div>
         </div>
@@ -167,7 +189,7 @@
 
         <div class="lobby-actions">
           <div class="share-row">
-            <a id="btn-whatsapp" class="btn btn-whatsapp" href="https://wa.me/" target="_blank" rel="noopener">📱 WhatsApp</a>
+            <a id="btn-whatsapp" class="btn btn-whatsapp" href="https://wa.me/" target="_blank" rel="noopener">💬 WhatsApp</a>
             <button id="btn-copy-link" class="btn btn-ghost" type="button">🔗 Copiar link</button>
           </div>
           <button id="btn-leave" class="btn btn-ghost btn-block" type="button">Salir</button>
@@ -189,6 +211,11 @@
           <span class="th-stat">Goles <b id="th-goals">0</b></span>
         </div>
         <div class="th-row th-controls">
+          <span class="th-label">Controlás</span>
+          <div class="th-seg" role="group" aria-label="Cuántos cuerpos controlás">
+            <button class="th-bodies" data-bodies="1" type="button">1</button>
+            <button class="th-bodies" data-bodies="2" type="button">2</button>
+          </div>
           <span class="th-label">Rivales</span>
           <div class="th-seg" role="group" aria-label="Rivales">
             <button class="th-def" data-def="0" type="button">0</button>
@@ -262,11 +289,15 @@
                  aria-label="Volumen general">
         </div>
 
-        <div class="opt-row">
-          <label class="opt-label" for="opt-relator">🎙️ Relator</label>
-          <input id="opt-relator" class="opt-check" type="checkbox" checked>
+        <!-- Relator: SOLO visible si hay un pack de voz real instalado (v1.6).
+             Sin pack, esta fila se oculta (client.js la togglea). -->
+        <div id="relator-setting" class="hidden">
+          <div class="opt-row">
+            <label class="opt-label" for="opt-relator">🎙️ Relator</label>
+            <input id="opt-relator" class="opt-check" type="checkbox" checked>
+          </div>
+          <p id="relator-pack-label" class="relator-pack-label"></p>
         </div>
-        <p id="relator-pack-label" class="relator-pack-label">Voz sintética</p>
 
         <div class="opt-row">
           <label class="opt-label" for="opt-fx">✨ Efectos</label>
@@ -289,7 +320,7 @@
         <!-- v1.4 H: extrapolación de mundo completo. 0 = Auto (≈ medio RTT, tope
              200 ms); >0 fuerza esos ms. Más = más responsivo, más "snap" al fallar. -->
         <div class="opt-row">
-          <label class="opt-label" for="opt-extrapolation">⚡ Predicción</label>
+          <label class="opt-label" for="opt-extrapolation">⚡ Respuesta</label>
           <input id="opt-extrapolation" class="opt-range" type="range" min="0" max="200" step="10" value="0"
                  aria-label="Extrapolación (0 = Auto)">
         </div>

@@ -4,6 +4,36 @@ Todos los cambios notables de PoliGol se documentan acá.
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es/) y el proyecto usa
 versionado semántico.
 
+## [1.6.0] — 2026-06-12
+
+Repaso de menús, consistencia y mobile.
+
+### Cambiado
+- **Home con pestañas**: "¿Qué querés hacer?" → Crear / Unirse / Entrenar. Solo se
+  muestran los campos de la acción elegida (el nombre de sala y la visibilidad ya no
+  aparecen cuando solo querés unirte o entrenar). Mucho más corto y claro en celular.
+- **Opciones más simples**: "Predicción (≈ ½ RTT)" pasó a "⚡ Respuesta · Automática
+  (recomendada)".
+- **Lobby más consistente**: el interruptor de Barrida ahora tiene el texto a la
+  izquierda y el switch a la derecha (igual que el resto); el modo "Dúo" ya no se
+  corta; botón de WhatsApp más prolijo.
+
+### Sacado
+- **Relator de voz sintética**: sonaba robótico, lo eliminamos. El relator ahora solo
+  suena si instalás un **pack de voz real** en `public/voices/` (instrucciones en el
+  repo) — por ejemplo grabaciones propias o con licencia. No podemos incluir voces de
+  relatores conocidos (Macaya Márquez, etc.) porque son material con derechos de autor.
+  Los efectos de sonido (pelota, gol) siguen igual.
+
+### Agregado
+- **Entrenamiento en dúo**: en el modo Entrenar podés controlar **2 jugadores** a la
+  vez (selector "Controlás 1 / 2" en el HUD), igual que el modo Dúo online — para
+  practicar el doble control solo.
+
+### Arreglado
+- Un gol en el entrenamiento en dúo rompía el festejo (no existía un cuerpo "me").
+- Todo verificado en celular (vertical y apaisado) y en todos los modos.
+
 ## [1.5.0] — 2026-06-12
 
 Modo Entrenamiento (jugar solo).

@@ -389,7 +389,7 @@ function syncSettingsUI() {
 function updateExtrapolationLabel() {
   if (!optExtrapolationLabel) return;
   const v = settings.extrapolation;
-  optExtrapolationLabel.textContent = v > 0 ? v + " ms" : "Auto (≈ ½ RTT)";
+  optExtrapolationLabel.textContent = v > 0 ? "Manual · " + v + " ms" : "Automática (recomendada)";
 }
 
 function openOptions() {
@@ -524,8 +524,8 @@ let extWorld = null;       // último mundo extrapolado renderizado (clon de bas
 // v1.5 — Modo entrenamiento (solo, 100% client-side): corre el MISMO physics-core
 // localmente a 60 Hz (sin servidor, sin latencia). Cuando training != null, el
 // pipeline de render/input se alimenta de su estado local en vez de la red.
-let training = null;       // { state, accMs, lastNs, goals, defenders, stadium, ... } o null
-let trainingCfg = { defenders: 0, stadium: "clasico" };
+let training = null;       // { state, accMs, lastNs, goals, defenders, stadium, duo, ... } o null
+let trainingCfg = { defenders: 0, stadium: "clasico", duo: false };
 // Offset de corrección por disco (id → {dx,dy}); render = extrapolado + offset, el
 // offset decae a 0 en ~120 ms (anti-snap). La pelota usa la clave "__ball__".
 const dragOffset = new Map();
@@ -930,8 +930,32 @@ on(roomInput, "keydown", (e) => {
   if (e.key === "Enter") btnJoin.click();
 });
 on(nameInput, "keydown", (e) => {
-  if (e.key === "Enter") btnCreate.click();
+  if (e.key === "Enter") {
+    const t = activeHomeTab();
+    if (t === "join") btnJoin.click();
+    else if (t === "train") startTraining();
+    else btnCreate.click();
+  }
 });
+
+/* v1.6: pestañas del home (Crear / Unirse / Entrenar). Solo se muestra el panel de
+ * la acción elegida, así cada campo (nombre de sala, código…) está en su contexto. */
+function activeHomeTab() {
+  const checked = document.querySelector('input[name="home-action"]:checked');
+  return checked ? checked.value : "create";
+}
+function setHomeTab(tab) {
+  const panelCreate = $("panel-create");
+  const panelJoin = $("panel-join");
+  const panelTrain = $("panel-train");
+  if (panelCreate) panelCreate.classList.toggle("hidden", tab !== "create");
+  if (panelJoin) panelJoin.classList.toggle("hidden", tab !== "join");
+  if (panelTrain) panelTrain.classList.toggle("hidden", tab !== "train");
+}
+for (const id of ["tab-create", "tab-join", "tab-train"]) {
+  on($(id), "change", () => setHomeTab($(id).value));
+}
+setHomeTab(activeHomeTab());
 
 // ?room=CODE en la URL → precargar el código en el home (SPEC).
 {
@@ -3088,108 +3112,26 @@ function kazooNote(freq, t, dur, wobble) {
   }
 }
 
-/* ========================== Relator (speechSynthesis) ========================== */
-// RELATOR en español. Voz: es-AR > es-419 > es-MX > es-US > es-ES > cualquier es*.
-// Eventos cableados (etapa 1):
-//   commentator("start", {})                  ← handleStart
-//   commentator("goal", { name, streak })     ← handleGoal (streak ≥ 2 ⇒ racha)
-//   commentator("owngoal", { name })          ← handleGoal (gol en contra)
-//   commentator("tackle", { name, rival })    ← handleState (stun nuevo; name = el que barre)
-//   commentator("gameover", { name })         ← handleGameover (nombres del equipo)
-let relatorVoice = null;
-
-function pickRelatorVoice() {
-  if (!("speechSynthesis" in window)) return null;
-  let voices = [];
-  try {
-    voices = speechSynthesis.getVoices() || [];
-  } catch (err) {
-    return null;
-  }
-  const norm = (l) => (l || "").toLowerCase().replace("_", "-");
-  for (const pref of ["es-ar", "es-419", "es-mx", "es-us", "es-es"]) {
-    const v = voices.find((vo) => norm(vo.lang) === pref);
-    if (v) return v;
-  }
-  return voices.find((vo) => norm(vo.lang).indexOf("es") === 0) || null;
-}
-
-if ("speechSynthesis" in window) {
-  relatorVoice = pickRelatorVoice();
-  try {
-    speechSynthesis.addEventListener("voiceschanged", () => {
-      relatorVoice = pickRelatorVoice();
-    });
-  } catch (err) {
-    try {
-      speechSynthesis.onvoiceschanged = () => {
-        relatorVoice = pickRelatorVoice();
-      };
-    } catch (err2) {
-      /* sin relator */
-    }
-  }
-}
-
-let speakPrio = 0;
+/* ================================ Relator ================================
+ * v1.6: se ELIMINÓ el relator de voz sintética (speechSynthesis) — sonaba robótico.
+ * El relator SOLO suena si el usuario instala un PACK DE VOZ REAL en public/voices/
+ * (ver public/voices/README.md). Sin pack: silencio (los SFX siguen igual). Eventos
+ * cableados: commentator("start"|"goal"|"owngoal"|"tackle"|"gameover", {name,...}). */
+let speakPrio = 0;  // prioridad/tiempo del clip del pack en curso (no-solapado, v1.2)
 let speakUntil = 0;
 
-// No solapar frases: se cancela la anterior; una frase de prioridad menor no
-// pisa a una mayor que todavía está sonando (gol/campeón > barrida).
-function relatorSay(text, prio, rate, pitch) {
-  if (!settings.relator) return;
-  if (!("speechSynthesis" in window)) return;
-  const nowMs = performance.now();
-  // speakUntil/speakPrio también los setea un clip del pack en curso (v1.2):
-  // la síntesis no habla encima de un clip de prioridad mayor.
-  if (nowMs < speakUntil && prio < speakPrio) return;
-  try {
-    voiceClipStop(); // no solapar la síntesis con un clip del pack (SPEC D)
-    speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    if (!relatorVoice) relatorVoice = pickRelatorVoice();
-    if (relatorVoice) {
-      u.voice = relatorVoice;
-      u.lang = relatorVoice.lang;
-    } else {
-      u.lang = "es-AR";
-    }
-    u.rate = rate;
-    u.pitch = pitch;
-    u.volume = 1;
-    u.onend = () => {
-      speakUntil = 0;
-    };
-    speakPrio = prio;
-    speakUntil = nowMs + 700 + text.length * 75; // estimación por si onend no llega
-    speechSynthesis.speak(u);
-  } catch (err) {
-    /* sin relator */
-  }
-}
-
 function relatorStop() {
-  voiceClipStop(); // v1.2: también corta el clip del pack en curso
+  voiceClipStop(); // corta el clip del pack en curso
   speakUntil = 0;
   speakPrio = 0;
-  try {
-    if ("speechSynthesis" in window) speechSynthesis.cancel();
-  } catch (err) {
-    /* ignorar */
-  }
-}
-
-function pickPhrase(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
 }
 
 function commentator(event, data) {
   if (!settings.relator) return;
+  if (voicePackState !== "ready") return; // sin pack de voces reales → sin relato
   const d = data || {};
-  // v1.2 (SPEC D): primero el pack de voz REAL, mapeando los MISMOS eventos del
-  // sintético: "gameover" → "win"; un gol con racha ≥ 2 prefiere "streak" y cae
-  // a "goal" si el pack no lo trae. Si el pack no cubre el evento (sin manifest,
-  // evento ausente o todos sus archivos fallaron) → síntesis SOLO para este.
+  // Mapeo de eventos del pack (mismos del manifest): "gameover" → "win"; un gol con
+  // racha ≥ 2 prefiere "streak" y cae a "goal" si el pack no lo trae.
   const packEvents =
     event === "gameover"
       ? ["win"]
@@ -3199,81 +3141,6 @@ function commentator(event, data) {
   for (const pe of packEvents) {
     if (voicePackSay(pe)) return; // sonando (o descartado por no-solapado)
   }
-  const name = typeof d.name === "string" ? d.name : "";
-  const rival = typeof d.rival === "string" ? d.rival : "";
-  let text = "";
-  let prio = 1;
-  let rate = 1.05;
-  let pitch = 1;
-  switch (event) {
-    case "start": {
-      const arr = ["¡Arranca el partido!", "¡Rueda la pelota!"];
-      if (match && match.players.length) {
-        // v1.3: nombres de USUARIOS (en duo cada usuario tiene 2 cuerpos).
-        const pool = [];
-        const seen = new Set();
-        for (const p of match.players) {
-          const nm = bodyUserName(p);
-          if (!nm || seen.has(nm)) continue;
-          seen.add(nm);
-          pool.push(nm);
-        }
-        if (pool.length) {
-          arr.push("Sale jugando " + pool[Math.floor(Math.random() * pool.length)] + "...");
-        }
-      }
-      text = pickPhrase(arr);
-      prio = 2;
-      break;
-    }
-    case "goal": {
-      if (!name) return;
-      text = pickPhrase([
-        "¡GOOOOOL de " + name + "!",
-        "¡Golazo de " + name + "!",
-        "¡La mandó a guardar " + name + "!",
-        "¡Qué definición de " + name + ", no lo puedo creer!",
-      ]);
-      if (typeof d.streak === "number" && d.streak >= 2) {
-        text += " ¡" + name + " está intratable!";
-      }
-      prio = 3;
-      rate = 1.12;
-      pitch = 1.1;
-      break;
-    }
-    case "owngoal": {
-      if (!name) return;
-      text = pickPhrase([
-        "¡En contra! ¡Insólito lo de " + name + "!",
-        "¡" + name + " le erró al arco... metió un gol en contra!",
-      ]);
-      prio = 3;
-      rate = 1.1;
-      break;
-    }
-    case "tackle": {
-      const arr = ["¡Eso es roja, árbitro!"];
-      if (name) arr.push("¡Tremenda patada de " + name + "!");
-      if (rival) arr.push("¡Le pegó una patada criminal a " + rival + "!");
-      text = pickPhrase(arr);
-      prio = 1;
-      break;
-    }
-    case "gameover": {
-      if (!name) return;
-      text = pickPhrase([
-        "¡" + name + ", campeón del PoliGol!",
-        "¡Se terminó! ¡La copa es de " + name + "!",
-      ]);
-      prio = 4;
-      pitch = 1.08;
-      break;
-    }
-    default:
-      return;
-  }
-  if (text) relatorSay(text, prio, rate, pitch);
 }
 
 /* ==================== Relator — packs de voz reales (v1.2, SPEC D) ====================
@@ -3424,7 +3291,7 @@ function voicePackFinalize() {
   updateRelatorPackLabel();
 }
 
-// Corta el clip del pack en curso (relatorStop, relatorSay y voicePackSay).
+// Corta el clip del pack en curso (lo llaman relatorStop y voicePackSay).
 function voiceClipStop() {
   if (voiceClipSource) {
     const src = voiceClipSource;
@@ -3440,9 +3307,12 @@ function voiceClipStop() {
 
 // #relator-pack-label (opciones, SPEC D/F): nombre del pack o "Voz sintética".
 function updateRelatorPackLabel() {
-  if (!relatorPackLabel) return;
-  relatorPackLabel.textContent =
-    voicePackState === "ready" && voicePackName ? voicePackName : "Voz sintética";
+  // v1.6: la fila del relator solo se muestra si hay un PACK DE VOZ REAL cargado.
+  // Sin pack no hay relator (se eliminó la voz sintética), así que se oculta.
+  const row = $("relator-setting");
+  const hasPack = voicePackState === "ready" && !!voicePackName;
+  if (row) row.classList.toggle("hidden", !hasPack);
+  if (relatorPackLabel) relatorPackLabel.textContent = hasPack ? "🎙️ " + voicePackName : "";
 }
 
 // Intenta relatar `event` con el pack. true ⇒ el evento quedó CUBIERTO por el
@@ -4604,7 +4474,7 @@ function startTraining() {
   const country = selectedCountry || (prof && prof.country) || "AR";
   const name = (nameInput.value.trim() || (prof && prof.name) || "Vos").slice(0, 16);
   myId = "me";
-  buildTrainingMatch(name, country, trainingCfg.defenders, trainingCfg.stadium);
+  buildTrainingMatch(name, country, trainingCfg.defenders, trainingCfg.stadium, trainingCfg.duo);
   training = {
     state: buildTrainingState(),
     accMs: 0,
@@ -4614,6 +4484,7 @@ function startTraining() {
     resetAt: 0,
     defenders: trainingCfg.defenders,
     stadium: trainingCfg.stadium,
+    duo: trainingCfg.duo,
   };
   // Buffers de red/extrapolación: no se usan en entrenamiento.
   baseState = null;
@@ -4643,9 +4514,12 @@ function startTraining() {
   showScreen("game");
   enterGameDisplay();
   startInputLoop(); // inocuo: flushInput corta en entrenamiento
-  updateTouchButtonsVisibility(false); // ⚽/🦵 visibles (no-duo)
+  // v1.6: en dúo (isDuo() lee match.mode) las zonas táctiles cubren la pantalla ⇒
+  // se ocultan ⚽/🦵 y, por teclado, se muestra el cartel de teclas A/B.
+  updateTouchButtonsVisibility(isDuo());
   hideMatchClock();
-  hideDuoKeysHint();
+  if (isDuo() && !IS_TOUCH) showDuoKeysHint();
+  else hideDuoKeysHint();
   clearOverlayTimers();
   overlayEl.textContent = "";
   const d = document.createElement("div");
@@ -4660,19 +4534,26 @@ function startTraining() {
 }
 
 // Objeto `match` para que el render funcione (bounds/arena/goals/posts/players/byId/
-// teams). Jugador = team 0 (izquierda), rivales = team 1 (derecha).
-function buildTrainingMatch(name, country, defenders, stadium) {
+// teams). Vos = team 0 (izquierda), rivales = team 1 (derecha). En dúo controlás 2
+// cuerpos (mode "duo" ⇒ isDuo() ⇒ doble joystick/teclas A·B, igual que online).
+function buildTrainingMatch(name, country, defenders, stadium, duo) {
   const n = 2;
   baseArena = PHYS.buildArena(n, stadium);
   const verts = polygonVerts(n);
   const bounds = vertsBounds(verts);
   const meInfo = countryInfo(country);
-  const players = [
-    {
-      id: "me", name: name, country: country, team: 0, owner: "me", slot: 0,
+  const players = [];
+  const myIds = [];
+  // Cuerpo(s) propio(s): 1 en solo, 2 en dúo (owner "me", slots 0/1).
+  const mySlots = duo ? [0, 1] : [0];
+  for (const slot of mySlots) {
+    const id = duo ? "me_" + (slot === 1 ? "b" : "a") : "me";
+    myIds.push(id);
+    players.push({
+      id: id, name: name, country: country, team: 0, owner: "me", slot: slot,
       c1: meInfo.c1, c2: meInfo.c2, flag: flagOf(country),
-    },
-  ];
+    });
+  }
   for (let i = 0; i < defenders; i++) {
     const bc = TRAIN_BOT_COUNTRIES[i % TRAIN_BOT_COUNTRIES.length];
     const bi = countryInfo(bc);
@@ -4682,6 +4563,7 @@ function buildTrainingMatch(name, country, defenders, stadium) {
     });
   }
   const byId = new Map(players.map((p) => [p.id, p]));
+  const mine = players.filter((p) => p.owner === "me");
   const mkTeam = (idx, members) => ({
     index: idx, members: members, users: members,
     c1: members[0] ? members[0].c1 : "#9fb0c8",
@@ -4689,9 +4571,9 @@ function buildTrainingMatch(name, country, defenders, stadium) {
     flags: members.map((m) => m.flag).join(""),
   });
   match = {
-    mode: "training", stadium: stadium, n: n, players: players, byId: byId,
-    teams: [mkTeam(0, [players[0]]), mkTeam(1, players.slice(1))],
-    myTeam: 0, myBodyIds: new Set(["me"]),
+    mode: duo ? "duo" : "training", stadium: stadium, n: n, players: players, byId: byId,
+    teams: [mkTeam(0, mine), mkTeam(1, players.filter((p) => p.owner !== "me"))],
+    myTeam: 0, myBodyIds: new Set(myIds),
     ownerNames: new Map([["me", name]]),
     target: "goals", value: 0, golden: false, tackles: true,
     arena: baseArena, goals: baseArena.goals, posts: baseArena.posts,
@@ -4714,11 +4596,14 @@ function buildTrainingState() {
   return { bodies: bodies, ball: PHYS.makeBall(), rules: { tackles: true } };
 }
 
-// Saque: jugador a la izquierda mirando al arco derecho; rivales cerca del arco
-// derecho (el que el jugador ataca), repartidos en y si son 2.
+// Saque: tus cuerpos a la izquierda mirando al arco derecho (en dúo separados ±55);
+// rivales cerca del arco derecho (el que atacás), repartidos en y si son 2.
 function trainingSpawn(pl) {
-  if (pl.id === "me") return { x: -RECT_W * 0.5, y: 0, fx: 1, fy: 0 };
-  const bots = match.players.filter((p) => p.id !== "me");
+  if (pl.owner === "me") {
+    const y = pl.slot === 1 ? 55 : trainingCfg.duo ? -55 : 0;
+    return { x: -RECT_W * 0.5, y: y, fx: 1, fy: 0 };
+  }
+  const bots = match.players.filter((p) => p.owner !== "me");
   const idx = bots.indexOf(pl);
   const y = bots.length <= 1 ? 0 : idx === 0 ? -70 : 70;
   return { x: RECT_W * 0.55, y: y, fx: -1, fy: 0 };
@@ -4755,16 +4640,24 @@ function trainingTick() {
     return; // física congelada durante el festejo del gol
   }
   const inputs = {};
-  const mv = currentInputFor(0);
-  inputs.me = { mx: mv.mx, my: mv.my, kick: kickHeldFor(0), tackle: queuedTackle[0] };
-  queuedTackle[0] = false; // consumir el edge de barrida (no pasa por flushInput)
+  // Tus cuerpos (owner "me"): input por SLOT (en dúo, A=slot 0 / B=slot 1). Bots: IA.
   for (const b of t.state.bodies) {
-    if (b.owner !== "me") inputs[b.id] = aiInput(b);
+    const pl = match.byId.get(b.id);
+    if (pl && pl.owner === "me") {
+      const slot = pl.slot === 1 ? 1 : 0;
+      const mv = currentInputFor(slot);
+      inputs[b.id] = { mx: mv.mx, my: mv.my, kick: kickHeldFor(slot), tackle: queuedTackle[slot] };
+    } else {
+      inputs[b.id] = aiInput(b);
+    }
   }
+  queuedTackle[0] = false; // consumir el edge de barrida (no pasa por flushInput)
+  queuedTackle[1] = false;
   const evs = PHYS.stepWorld(t.state, inputs, match.arena, match.arena.phys, t.state.rules);
   if (evs) {
     for (const e of evs) {
-      if (e.type === "kicked" && e.id === "me") trainingKickRing();
+      const pl = match.byId.get(e.id);
+      if (e.type === "kicked" && pl && pl.owner === "me") trainingKickRing(e.id);
     }
   }
   if (PHYS.goalCheck(t.state.ball, match.arena) >= 0) onTrainingGoal();
@@ -4799,10 +4692,10 @@ function aiInput(bot) {
   return { mx: mx / ml, my: my / ml, kick: false, tackle: false };
 }
 
-function trainingKickRing() {
-  const me = training.state.bodies.find((b) => b.id === "me");
-  if (!me) return;
-  ringFx.push({ x: me.x, y: me.y, t: performance.now() });
+function trainingKickRing(bodyId) {
+  const b = training.state.bodies.find((x) => x.id === bodyId);
+  if (!b) return;
+  ringFx.push({ x: b.x, y: b.y, t: performance.now() });
   lastKickT = performance.now();
 }
 
@@ -4814,7 +4707,8 @@ function onTrainingGoal() {
   t.resetAt = performance.now() + 1100;
   clearOverlayTimers();
   overlayEl.textContent = "";
-  const me = match.byId.get("me");
+  // v1.6: en dúo no existe un cuerpo con id "me" (son me_a/me_b) — usar uno propio.
+  const me = match.players.find((p) => p.owner === "me") || { c1: "#5ee88a", c2: "#ffffff" };
   const goalText = document.createElement("div");
   goalText.className = "goal-text";
   goalText.textContent = "¡GOL!";
@@ -4882,24 +4776,40 @@ function sampleTrainingState() {
   };
 }
 
-function setTrainingDefenders(n) {
-  trainingCfg.defenders = Math.max(0, Math.min(2, n | 0));
-  syncTrainingHud();
+// Rearma cancha + estado con la config actual (rivales/dúo), conservando los goles.
+function rebuildTraining() {
   if (!training) return;
-  // Rearmar cancha/estado con la nueva cantidad de rivales, conservando los goles.
   const goals = training.goals;
-  const meBody = match.byId.get("me");
-  const name = match.ownerNames.get("me") || "Vos";
-  const country = meBody ? meBody.country : "AR";
-  buildTrainingMatch(name, country, trainingCfg.defenders, training.stadium);
+  const mePl = match.players.find((p) => p.owner === "me");
+  const name = (match.ownerNames && match.ownerNames.get("me")) || "Vos";
+  const country = mePl ? mePl.country : "AR";
+  buildTrainingMatch(name, country, trainingCfg.defenders, training.stadium, trainingCfg.duo);
   training.state = buildTrainingState();
   training.defenders = trainingCfg.defenders;
+  training.duo = trainingCfg.duo;
   training.paused = false;
   training.goals = goals;
   ringFx = [];
   ballTrail = [];
   feetState.clear();
+  kickHoldSources[0].clear();
+  kickHoldSources[1].clear();
+  updateTouchButtonsVisibility(isDuo());
+  if (isDuo() && !IS_TOUCH) showDuoKeysHint();
+  else hideDuoKeysHint();
   updateTrainingGoals();
+}
+
+function setTrainingDefenders(n) {
+  trainingCfg.defenders = Math.max(0, Math.min(2, n | 0));
+  syncTrainingHud();
+  rebuildTraining();
+}
+
+function setTrainingDuo(duo) {
+  trainingCfg.duo = !!duo;
+  syncTrainingHud();
+  rebuildTraining();
 }
 
 function updateTrainingGoals() {
@@ -4912,6 +4822,9 @@ function syncTrainingHud() {
   if (!hud) return;
   for (const b of hud.querySelectorAll(".th-def")) {
     b.classList.toggle("active", +b.dataset.def === trainingCfg.defenders);
+  }
+  for (const b of hud.querySelectorAll(".th-bodies")) {
+    b.classList.toggle("active", (b.dataset.bodies === "2") === trainingCfg.duo);
   }
 }
 
@@ -4927,6 +4840,9 @@ on($("btn-train-reset"), "click", () => resetTrainingBall(true));
   if (trainHud) {
     for (const b of trainHud.querySelectorAll(".th-def")) {
       b.addEventListener("click", () => setTrainingDefenders(+b.dataset.def));
+    }
+    for (const b of trainHud.querySelectorAll(".th-bodies")) {
+      b.addEventListener("click", () => setTrainingDuo(b.dataset.bodies === "2"));
     }
   }
   syncTrainingHud();

@@ -1234,6 +1234,30 @@ body.in-game .gear-btn-global {
   outline-offset: 2px;
 }
 
+/* Selector de acción del home (Crear / Unirse / Entrenar): 3 columnas. */
+.segmented.home-tabs {
+  grid-template-columns: 1fr 1fr 1fr;
+}
+.home-tabs .seg-label {
+  font-size: 0.82rem;
+  padding: 0.6em 0.25em;
+}
+
+/* Paneles de acción del home: solo se muestra el de la pestaña activa. */
+.action-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.action-panel.hidden {
+  display: none;
+}
+.train-blurb {
+  text-align: center;
+  line-height: 1.5;
+  margin: 0;
+}
+
 /* ---------- Tarjeta de salas públicas (home) ---------- */
 .rooms-card {
   width: 100%;
