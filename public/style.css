@@ -2019,6 +2019,35 @@ body.in-game .gear-btn-global {
   font-size: 0.88rem;
 }
 
+/* Selector de idioma ES/EN (en Opciones y arriba del modal de perfil) */
+.lang-toggle {
+  display: inline-flex;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.lang-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink-dim);
+  font-weight: 800;
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+  padding: 7px 16px;
+  cursor: pointer;
+  transition: background-color var(--speed) var(--ease), color var(--speed) var(--ease);
+}
+.lang-btn:hover { background: var(--glass-bg); color: var(--ink); }
+.lang-btn.active { background: var(--gold); color: #1a1304; }
+/* En el modal de perfil el toggle va en su propia fila, alineado a la derecha
+   (la card es flex column), arriba del título — sin superponerse. */
+#profile-modal .modal-card > .lang-toggle {
+  align-self: flex-end;
+  margin-bottom: -2px;
+}
+
 .options-modal {
   position: fixed;
   inset: 0;

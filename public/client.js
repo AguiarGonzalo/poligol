@@ -154,8 +154,190 @@ const MATCH_TIME_VALUES = [120, 180, 300, 600];  // target = "time" (segundos)
 const MATCH_GOALS_DEFAULT = 3;                   // default del SPEC
 const MATCH_TIME_DEFAULT = 180;                  // default local al pasar a "time"
 
-const MODE_LABELS = { ffa: "Todos contra todos", "1v1": "1 vs 1", "2v2": "2 vs 2", duo: "Dúo" };
-const STADIUM_LABELS = { clasico: "Clásico", noche: "Noche", playa: "Playa", nieve: "Nieve" };
+/* ============================ i18n (ES / EN) — v1.8 ============================
+ * Todo el texto vive acá. `t(key, vars)` resuelve según el idioma elegido (guardado
+ * en localStorage; default por el idioma del navegador). El HTML estático se traduce
+ * con atributos data-i18n / data-i18n-ph / data-i18n-aria / data-i18n-html. */
+const I18N = {
+  es: {
+    tagline: "Fútbol multijugador · rápido y sin delay",
+    menu_create: "⚽ Crear sala", menu_join: "🔑 Unirse", menu_train: "🎯 Entrenar",
+    lobby_hint_copy: "Tocá el código para copiar el link de invitación",
+    lbl_mode: "Modo",
+    mode_ffa: "⚔️ Todos contra todos", mode_1v1: "🥊 1 vs 1", mode_2v2: "🤝 2 vs 2", mode_duo: "🎮 Dúo (2 c/u)",
+    lbl_stadium: "Estadio",
+    stadium_clasico: "☀️ Clásico", stadium_noche: "🌙 Noche", stadium_playa: "🏖️ Playa", stadium_nieve: "❄️ Nieve",
+    lbl_match: "Partido a", match_goals: "🥅 Goles", match_time: "⏱️ Tiempo",
+    rule_tackles: "🦵 Barrida",
+    team_1: "Equipo 1", team_2: "Equipo 2", swap_team: "⇄ Cambiar de equipo",
+    copy_link: "🔗 Copiar link", leave: "Salir", rematch: "Revancha",
+    label_goals_word: "Goles",
+    duo_hint_title: "🎮 Controlás 2 cuerpos", duo_body_a: "Cuerpo A", duo_body_b: "Cuerpo B ②",
+    duo_a_move_html: "<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> mover",
+    duo_a_kick_html: "<kbd>F</kbd> patear<span class=\"duo-keys-tackle\"> · <kbd>G</kbd> barrer</span>",
+    duo_b_move_html: "<kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd> mover",
+    duo_b_kick_html: "<kbd>L</kbd> patear<span class=\"duo-keys-tackle\"> · <kbd>K</kbd> barrer</span>",
+    rotate_text: "Girá el teléfono",
+    profile_name_label: "Tu nombre", profile_name_ph: "Tu nombre", profile_country_label: "Tu selección",
+    create_title: "⚽ Nueva sala", create_roomname_label: "Nombre de la sala", create_roomname_ph: "Sala de…",
+    lbl_visibility: "Visibilidad", vis_public: "🌐 Pública", vis_private: "🔒 Privada",
+    vis_hint: "Pública: aparece en la lista para cualquiera · Privada: solo con el código",
+    create_confirm: "Crear sala",
+    join_title: "🔑 Unirse a una sala", public_rooms: "🌐 Salas públicas",
+    join_code_label: "o con un código", code_ph: "CÓDIGO", join_confirm: "Unirse",
+    refresh_aria: "Refrescar lista de salas",
+    options_title: "⚙️ Opciones", opt_training: "🎯 Entrenamiento", opt_controls: "Controlás", opt_rivals: "Rivales",
+    train_reset: "↺ Reiniciar la pelota", train_exit: "Salir del entrenamiento", opt_settings: "Ajustes",
+    opt_volume: "🔊 Volumen", opt_relator: "🎙️ Relator", opt_fullscreen: "🖥️ Pantalla completa",
+    opt_fx: "✨ Efectos", fx_high: "Altos", fx_low: "Bajos",
+    opt_vibration: "📳 Vibración", opt_names: "🏷️ Nombres visibles", opt_response: "⚡ Respuesta",
+    opt_language: "🌐 Idioma", opt_profile: "Perfil", opt_edit: "Editar", opt_done: "Listo",
+    // Dinámicos
+    toast_name: "Escribí tu nombre", toast_country: "Elegí tu selección",
+    toast_code4: "El código de sala tiene 4 letras",
+    toast_conn_lost: "Se perdió la conexión con el servidor", toast_conn_fail: "No se pudo conectar al servidor",
+    toast_phys_loading: "El motor de física aún no cargó, probá de nuevo", toast_error: "Error",
+    profile_welcome_title: "⚽ ¡Bienvenido a PoliGol!",
+    profile_welcome_sub: "Elegí tu nombre y tu selección. Se guarda en este dispositivo — no lo vas a tener que poner de nuevo.",
+    profile_edit_title: "👤 Tu perfil", profile_edit_sub: "Cambiá tu nombre o tu selección cuando quieras.",
+    profile_save_first: "Guardar y jugar", profile_save: "Guardar",
+    ready_yes: "¡ESTOY LISTO! ✅", ready_wait: "Esperá... ❌",
+    lobby_room_default: "Sala de espera", room_default: "Sala de {name}",
+    rooms_empty: "No hay salas públicas — creá la tuya", room_pure: "Sin barrida", slot_free: "Lugar libre",
+    host_badge: "Host", go: "¡VAMOS!", play_overlay: "¡A JUGAR!", train_overlay: "¡A ENTRENAR!",
+    goal: "¡GOL!", goal_by: "¡GOL DE {name}!", owngoal_title: "¡GOL EN CONTRA!",
+    owngoal_sub: "{name} la mandó contra su propio arco", goal_sub_in: "En el arco de {name}",
+    golden_title: "¡GOL DE ORO!", golden_sub: "El próximo gol gana el partido", clock_golden: "GOL DE ORO",
+    champion_one: "¡Campeón del PoliGol!", champion_many: "¡Campeones del PoliGol!", champion_default: "Campeón",
+    reason_golden: "¡Gol de oro!", reason_time: "Se terminó el tiempo",
+    team_word: "Equipo", and_join: " y ",
+    whatsapp_text: "⚽ ¡Sumate a mi partido de PoliGol! ",
+    chip_goals: "a {v} goles", chip_goal1: "a 1 gol", chip_min: "{m} min",
+    opt_goals: "{v} goles", opt_goal1: "1 gol", opt_min: "{m} min",
+    resp_auto: "Automática (recomendada)", resp_manual: "Manual · {ms} ms",
+  },
+  en: {
+    tagline: "Multiplayer football · fast and lag-free",
+    menu_create: "⚽ Create room", menu_join: "🔑 Join", menu_train: "🎯 Practice",
+    lobby_hint_copy: "Tap the code to copy the invite link",
+    lbl_mode: "Mode",
+    mode_ffa: "⚔️ Free for all", mode_1v1: "🥊 1 vs 1", mode_2v2: "🤝 2 vs 2", mode_duo: "🎮 Duo (2 each)",
+    lbl_stadium: "Stadium",
+    stadium_clasico: "☀️ Classic", stadium_noche: "🌙 Night", stadium_playa: "🏖️ Beach", stadium_nieve: "❄️ Snow",
+    lbl_match: "Match to", match_goals: "🥅 Goals", match_time: "⏱️ Time",
+    rule_tackles: "🦵 Slide tackle",
+    team_1: "Team 1", team_2: "Team 2", swap_team: "⇄ Switch team",
+    copy_link: "🔗 Copy link", leave: "Leave", rematch: "Rematch",
+    label_goals_word: "Goals",
+    duo_hint_title: "🎮 You control 2 players", duo_body_a: "Player A", duo_body_b: "Player B ②",
+    duo_a_move_html: "<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move",
+    duo_a_kick_html: "<kbd>F</kbd> kick<span class=\"duo-keys-tackle\"> · <kbd>G</kbd> tackle</span>",
+    duo_b_move_html: "<kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd> move",
+    duo_b_kick_html: "<kbd>L</kbd> kick<span class=\"duo-keys-tackle\"> · <kbd>K</kbd> tackle</span>",
+    rotate_text: "Rotate your phone",
+    profile_name_label: "Your name", profile_name_ph: "Your name", profile_country_label: "Your team",
+    create_title: "⚽ New room", create_roomname_label: "Room name", create_roomname_ph: "Room of…",
+    lbl_visibility: "Visibility", vis_public: "🌐 Public", vis_private: "🔒 Private",
+    vis_hint: "Public: shows in the list for anyone · Private: only with the code",
+    create_confirm: "Create room",
+    join_title: "🔑 Join a room", public_rooms: "🌐 Public rooms",
+    join_code_label: "or with a code", code_ph: "CODE", join_confirm: "Join",
+    refresh_aria: "Refresh room list",
+    options_title: "⚙️ Options", opt_training: "🎯 Practice", opt_controls: "You control", opt_rivals: "Opponents",
+    train_reset: "↺ Reset the ball", train_exit: "Leave practice", opt_settings: "Settings",
+    opt_volume: "🔊 Volume", opt_relator: "🎙️ Commentary", opt_fullscreen: "🖥️ Fullscreen",
+    opt_fx: "✨ Effects", fx_high: "High", fx_low: "Low",
+    opt_vibration: "📳 Vibration", opt_names: "🏷️ Show names", opt_response: "⚡ Responsiveness",
+    opt_language: "🌐 Language", opt_profile: "Profile", opt_edit: "Edit", opt_done: "Done",
+    toast_name: "Enter your name", toast_country: "Pick your team",
+    toast_code4: "Room codes are 4 letters",
+    toast_conn_lost: "Lost connection to the server", toast_conn_fail: "Couldn't connect to the server",
+    toast_phys_loading: "The physics engine is still loading, try again", toast_error: "Error",
+    profile_welcome_title: "⚽ Welcome to PoliGol!",
+    profile_welcome_sub: "Pick your name and team. It's saved on this device — you won't have to enter it again.",
+    profile_edit_title: "👤 Your profile", profile_edit_sub: "Change your name or team whenever you want.",
+    profile_save_first: "Save and play", profile_save: "Save",
+    ready_yes: "I'M READY! ✅", ready_wait: "Wait... ❌",
+    lobby_room_default: "Waiting room", room_default: "{name}'s room",
+    rooms_empty: "No public rooms — create yours", room_pure: "No tackles", slot_free: "Open slot",
+    host_badge: "Host", go: "GO!", play_overlay: "KICK OFF!", train_overlay: "LET'S PRACTICE!",
+    goal: "GOAL!", goal_by: "GOAL — {name}!", owngoal_title: "OWN GOAL!",
+    owngoal_sub: "{name} scored into their own net", goal_sub_in: "Into {name}'s goal",
+    golden_title: "GOLDEN GOAL!", golden_sub: "Next goal wins the match", clock_golden: "GOLDEN GOAL",
+    champion_one: "PoliGol champion!", champion_many: "PoliGol champions!", champion_default: "Champion",
+    reason_golden: "Golden goal!", reason_time: "Time's up",
+    team_word: "Team", and_join: " & ",
+    whatsapp_text: "⚽ Join my PoliGol match! ",
+    chip_goals: "to {v} goals", chip_goal1: "to 1 goal", chip_min: "{m} min",
+    opt_goals: "{v} goals", opt_goal1: "1 goal", opt_min: "{m} min",
+    resp_auto: "Automatic (recommended)", resp_manual: "Manual · {ms} ms",
+  },
+};
+// Mensajes del servidor (vienen en español): se traducen en el cliente por texto.
+const SERVER_ERR_EN = {
+  "Sala no encontrada": "Room not found", "Partido en curso": "Match in progress",
+  "Sala llena": "Room full", "Código inválido": "Invalid code", "Nombre inválido": "Invalid name",
+  "País inválido": "Invalid country", "Ya estás en una sala": "You're already in a room",
+  "Solo el host puede cambiar el modo": "Only the host can change the mode", "Modo inválido": "Invalid mode",
+  "Demasiados jugadores para ese modo": "Too many players for that mode",
+  "Solo el host puede cambiar el estadio": "Only the host can change the stadium", "Estadio inválido": "Invalid stadium",
+  "Solo se puede cambiar de equipo en 2v2": "You can only switch teams in 2v2", "Equipo inválido": "Invalid team",
+  "Ese equipo está completo": "That team is full",
+  "Solo el host puede cambiar el objetivo": "Only the host can change the target", "Objetivo inválido": "Invalid target",
+  "Solo el host puede cambiar las reglas": "Only the host can change the rules", "Regla inválida": "Invalid rule",
+  "Solo el host puede pedir revancha": "Only the host can request a rematch", "Servidor lleno": "Server full",
+};
+const LANG_KEY = "poligol.lang";
+let lang = (function () {
+  try {
+    const s = localStorage.getItem(LANG_KEY);
+    if (s === "es" || s === "en") return s;
+  } catch (e) { /* ignore */ }
+  const nav = (navigator.language || "es").toLowerCase();
+  return nav.indexOf("es") === 0 ? "es" : "en";
+})();
+
+function t(key, vars) {
+  let s = (I18N[lang] && I18N[lang][key]) || I18N.es[key] || key;
+  if (vars) for (const k in vars) s = s.split("{" + k + "}").join(vars[k]);
+  return s;
+}
+// Traduce un texto que vino del servidor (en español) al idioma activo.
+function localizeServer(str) {
+  if (lang === "es" || typeof str !== "string") return str;
+  if (SERVER_ERR_EN[str]) return SERVER_ERR_EN[str];
+  const m = str.match(/^(.*) se desconectó$/);
+  if (m) return m[1] + " disconnected";
+  return str;
+}
+function modeLabel(m) { return t("mode_" + (m === "1v1" ? "1v1" : m === "2v2" ? "2v2" : m === "duo" ? "duo" : "ffa")); }
+function stadiumLabel(s) { return t("stadium_" + (["noche", "playa", "nieve"].indexOf(s) >= 0 ? s : "clasico")); }
+
+// Aplica las traducciones al HTML estático (data-i18n*) — en carga y al cambiar idioma.
+function applyI18n() {
+  try { document.documentElement.lang = lang; } catch (e) { /* ignore */ }
+  for (const el of document.querySelectorAll("[data-i18n]")) el.textContent = t(el.getAttribute("data-i18n"));
+  for (const el of document.querySelectorAll("[data-i18n-html]")) el.innerHTML = t(el.getAttribute("data-i18n-html"));
+  for (const el of document.querySelectorAll("[data-i18n-ph]")) el.setAttribute("placeholder", t(el.getAttribute("data-i18n-ph")));
+  for (const el of document.querySelectorAll("[data-i18n-aria]")) el.setAttribute("aria-label", t(el.getAttribute("data-i18n-aria")));
+}
+
+function setLang(l) {
+  lang = l === "en" ? "en" : "es";
+  try { localStorage.setItem(LANG_KEY, lang); } catch (e) { /* ignore */ }
+  applyI18n();
+  // Re-render de lo dinámico según la pantalla/estado actual.
+  if (typeof updateMatchValueOptions === "function") updateMatchValueOptions();
+  if (lobby && phase === "lobby" && typeof renderLobby === "function") renderLobby();
+  if (typeof syncLangToggle === "function") syncLangToggle();
+  if (typeof updateExtrapolationLabel === "function") updateExtrapolationLabel();
+}
+// Marca el botón ES/EN activo en los selectores de idioma.
+function syncLangToggle() {
+  for (const b of document.querySelectorAll(".lang-btn")) {
+    b.classList.toggle("active", b.getAttribute("data-lang") === lang);
+  }
+}
 
 /* ================================ Selecciones ================================ */
 // code ISO-2 mayúsculas, nombre en español, colores de camiseta {c1, c2}.
@@ -407,7 +589,7 @@ function syncSettingsUI() {
 function updateExtrapolationLabel() {
   if (!optExtrapolationLabel) return;
   const v = settings.extrapolation;
-  optExtrapolationLabel.textContent = v > 0 ? "Manual · " + v + " ms" : "Automática (recomendada)";
+  optExtrapolationLabel.textContent = v > 0 ? t("resp_manual", { ms: v }) : t("resp_auto");
 }
 
 function openOptions() {
@@ -619,8 +801,8 @@ function matchDefaultValue(target) {
 // Texto del chip de objetivo: "a 3 goles" / "a 1 gol" / "5 min" (SPEC v1.3 D).
 function matchChipLabel(target, value) {
   const v = matchValueOk(target, value) ? value : matchDefaultValue(target);
-  if (target === "time") return Math.round(v / 60) + " min";
-  return "a " + v + (v === 1 ? " gol" : " goles");
+  if (target === "time") return t("chip_min", { m: Math.round(v / 60) });
+  return v === 1 ? t("chip_goal1") : t("chip_goals", { v: v });
 }
 
 const IS_TOUCH =
@@ -666,11 +848,11 @@ function connectWs() {
     // debe sacarte del modo solo. Se ignora (la reconexión se hará al volver al home).
     if (training) return;
     if (phase !== "home") {
-      toast("Se perdió la conexión con el servidor");
+      toast(t("toast_conn_lost"));
       goHome(false);
     } else if (hadJoinIntent) {
       // La conexión falló con un create/join pendiente: avisar.
-      toast("No se pudo conectar al servidor");
+      toast(t("toast_conn_fail"));
     }
     // v1.2: sin polling, la lista de salas vive del push del server. Si el home
     // quedó sin conexión, reintentar cada 3 s para recuperar la suscripción.
@@ -720,7 +902,7 @@ function handleMessage(msg) {
       handleJoined(msg);
       break;
     case "error":
-      toast(typeof msg.message === "string" ? msg.message : "Error");
+      toast(typeof msg.message === "string" ? localizeServer(msg.message) : t("toast_error"));
       break;
     case "rooms":
       handleRooms(msg);
@@ -930,13 +1112,9 @@ function openProfileModal(firstRun) {
     if (nameInput) nameInput.value = p.name || "";
     if (p.country) selectCountry(p.country);
   }
-  if (profileTitle) profileTitle.textContent = firstRun ? "⚽ ¡Bienvenido a PoliGol!" : "👤 Tu perfil";
-  if (profileSub) {
-    profileSub.textContent = firstRun
-      ? "Elegí tu nombre y tu selección. Se guarda en este dispositivo — no lo vas a tener que poner de nuevo."
-      : "Cambiá tu nombre o tu selección cuando quieras.";
-  }
-  if (btnProfileSave) btnProfileSave.textContent = firstRun ? "Guardar y jugar" : "Guardar";
+  if (profileTitle) profileTitle.textContent = firstRun ? t("profile_welcome_title") : t("profile_edit_title");
+  if (profileSub) profileSub.textContent = firstRun ? t("profile_welcome_sub") : t("profile_edit_sub");
+  if (btnProfileSave) btnProfileSave.textContent = firstRun ? t("profile_save_first") : t("profile_save");
   closeModalEl(optionsModal);
   openModalEl(profileModal);
 }
@@ -944,12 +1122,12 @@ function openProfileModal(firstRun) {
 function saveProfileFromModal() {
   const name = (nameInput.value || "").trim();
   if (!name) {
-    toast("Escribí tu nombre");
+    toast(t("toast_name"));
     nameInput.focus();
     return;
   }
   if (!selectedCountry) {
-    toast("Elegí tu selección");
+    toast(t("toast_country"));
     return;
   }
   saveProfile(name, selectedCountry);
@@ -1017,7 +1195,7 @@ on(btnEditProfile, "click", () => openProfileModal(false));
 on(btnCreate, "click", () => {
   const p = requireProfile();
   if (!p) return;
-  if (roomNameInput) roomNameInput.placeholder = "Sala de " + p.name;
+  if (roomNameInput) roomNameInput.placeholder = t("room_default", { name: p.name });
   openModalEl(createModal);
 });
 on(btnCreateConfirm, "click", () => {
@@ -1025,7 +1203,7 @@ on(btnCreateConfirm, "click", () => {
   if (!p) return;
   const visibility = visPublic && visPublic.checked ? "public" : "private"; // default privada
   let roomName = roomNameInput ? roomNameInput.value.trim() : "";
-  if (!roomName) roomName = "Sala de " + p.name;
+  if (!roomName) roomName = t("room_default", { name: p.name });
   roomName = roomName.slice(0, ROOM_NAME_MAX);
   wsSend({ type: "create", name: p.name, country: p.country, visibility, roomName });
   closeModalEl(createModal);
@@ -1039,7 +1217,7 @@ function doJoin(code) {
   if (!p) return;
   code = (code || "").trim().toUpperCase();
   if (!/^[A-Z]{4}$/.test(code)) {
-    toast("El código de sala tiene 4 letras");
+    toast(t("toast_code4"));
     if (roomInput) roomInput.focus();
     return;
   }
@@ -1141,7 +1319,7 @@ function renderRooms(list) {
   if (list.length === 0) {
     const empty = document.createElement("li");
     empty.className = "rooms-empty";
-    empty.textContent = "No hay salas públicas — creá la tuya";
+    empty.textContent = t("rooms_empty");
     roomsList.appendChild(empty);
     return;
   }
@@ -1169,14 +1347,14 @@ function renderRooms(list) {
     meta.className = "room-card-meta";
     const chipMode = document.createElement("span");
     chipMode.className = "room-chip room-chip-mode";
-    chipMode.textContent = MODE_LABELS[r.mode] || String(r.mode || "");
+    chipMode.textContent = modeLabel(r.mode);
     const chipCount = document.createElement("span");
     chipCount.className = "room-chip room-chip-count";
     chipCount.textContent =
       (r.count != null ? r.count : "?") + "/" + (r.max != null ? r.max : "?");
     const chipStadium = document.createElement("span");
     chipStadium.className = "room-chip";
-    chipStadium.textContent = STADIUM_LABELS[r.stadium] || String(r.stadium || "");
+    chipStadium.textContent = stadiumLabel(r.stadium);
     meta.append(chipMode, chipCount, chipStadium);
     // v1.3 (SPEC D): chip de objetivo de partido ("a 3 goles" / "5 min").
     if (r.target === "goals" || r.target === "time") {
@@ -1189,7 +1367,7 @@ function renderRooms(list) {
     if (r.tackles === false) {
       const chipPure = document.createElement("span");
       chipPure.className = "room-chip room-chip-pure";
-      chipPure.textContent = "Sin barrida";
+      chipPure.textContent = t("room_pure");
       meta.appendChild(chipPure);
     }
     info.appendChild(meta);
@@ -1197,7 +1375,7 @@ function renderRooms(list) {
     const joinBtn = document.createElement("button");
     joinBtn.type = "button";
     joinBtn.className = "btn btn-secondary btn-join-room";
-    joinBtn.textContent = "Unirse";
+    joinBtn.textContent = t("join_confirm");
     joinBtn.addEventListener("click", () => doJoin(code));
 
     card.append(info, joinBtn);
@@ -1259,7 +1437,7 @@ function renderLobby(notice) {
   if (!lobby) return;
   const players = lobby.players;
   if (roomCodeLabel) roomCodeLabel.textContent = lobby.code || "····";
-  if (lobbyRoomName) lobbyRoomName.textContent = lobby.roomName || "Sala de espera";
+  if (lobbyRoomName) lobbyRoomName.textContent = lobby.roomName || t("lobby_room_default");
   if (lobbyVisibilityBadge) {
     const isPublic = lobby.visibility === "public";
     lobbyVisibilityBadge.textContent = isPublic ? "🌐 Pública" : "🔒 Privada";
@@ -1288,7 +1466,7 @@ function renderLobby(notice) {
     if (p.isHost) {
       const badge = document.createElement("span");
       badge.className = "host-badge";
-      badge.textContent = "Host";
+      badge.textContent = t("host_badge");
       li.appendChild(badge);
     }
     // El ✅ de ready lo agrega style.css vía .player-item.ready::after.
@@ -1325,7 +1503,7 @@ function renderLobby(notice) {
 
   // Toggle de ready (.is-ready = gris sin pulso, definido en style.css).
   if (btnReady) {
-    btnReady.textContent = myReady ? "Esperá... ❌" : "¡ESTOY LISTO! ✅";
+    btnReady.textContent = myReady ? t("ready_wait") : t("ready_yes");
     btnReady.classList.toggle("is-ready", myReady);
   }
 
@@ -1336,7 +1514,7 @@ function renderLobby(notice) {
   if (btnWhatsapp) {
     btnWhatsapp.href =
       "https://wa.me/?text=" +
-      encodeURIComponent("⚽ ¡Sumate a mi partido de PoliGol! " + inviteLink());
+      encodeURIComponent(t("whatsapp_text") + inviteLink());
     btnWhatsapp.target = "_blank";
     btnWhatsapp.rel = "noopener";
   }
@@ -1386,7 +1564,7 @@ function renderTeamsPanel() {
     for (; filled < slotsPerTeam; filled++) {
       const li = document.createElement("li");
       li.className = "empty";
-      li.textContent = "Lugar libre";
+      li.textContent = t("slot_free");
       ul.appendChild(li);
     }
   }
@@ -1420,7 +1598,7 @@ on(stadiumSelect, "change", () => {
 /* -------------------- Objetivo de partido (v1.3, SPEC D) -------------------- */
 // Repuebla #match-value-select según el target (goles: 1/3/5/10 — tiempo:
 // 2/3/5/10 min) y selecciona `selected` (o el default si no está en la lista).
-function populateMatchValues(target, selected) {
+function populateMatchValues(target, selected, force) {
   if (!matchValueSelect) return;
   const vals = target === "time" ? MATCH_TIME_VALUES : MATCH_GOALS_VALUES;
   let same = matchValueSelect.options.length === vals.length;
@@ -1432,19 +1610,25 @@ function populateMatchValues(target, selected) {
       }
     }
   }
-  if (!same) {
+  if (!same || force) {
     matchValueSelect.textContent = "";
     for (const v of vals) {
       const opt = document.createElement("option");
       opt.value = String(v);
       opt.textContent =
-        target === "time" ? Math.round(v / 60) + " min" : v === 1 ? "1 gol" : v + " goles";
+        target === "time" ? t("opt_min", { m: Math.round(v / 60) }) : v === 1 ? t("opt_goal1") : t("opt_goals", { v: v });
       matchValueSelect.appendChild(opt);
     }
   }
   matchValueSelect.value = String(
     matchValueOk(target, selected) ? selected : matchDefaultValue(target)
   );
+}
+
+// Re-traduce las opciones del select de objetivo (llamado por setLang).
+function updateMatchValueOptions() {
+  if (!matchTargetSelect || !matchValueSelect) return;
+  populateMatchValues(matchTargetSelect.value || "goals", parseInt(matchValueSelect.value, 10), true);
 }
 
 // Chip de objetivo en el lobby, junto al badge de visibilidad (se crea una vez;
@@ -1510,7 +1694,7 @@ function showLobbyCountdown(n) {
       // El "start" lo manda el server; mientras llega, cerrar la cuenta.
       clearInterval(lobbyCountdownTimer);
       lobbyCountdownTimer = 0;
-      lobbyCountdown.textContent = "¡VAMOS!";
+      lobbyCountdown.textContent = t("go");
     } else {
       lobbyCountdown.textContent = String(left);
       sfxCountdown(left);
@@ -1635,8 +1819,8 @@ function buildFieldPath(verts) {
 // v1.3: en duo el equipo tiene 2 cuerpos del MISMO usuario ⇒ un solo nombre.
 function teamLabel(team) {
   const list = team && team.users && team.users.length ? team.users : team ? team.members : null;
-  if (!list || list.length === 0) return "Equipo";
-  return list.map((m) => bodyUserName(m)).join(" y ");
+  if (!list || list.length === 0) return t("team_word");
+  return list.map((m) => bodyUserName(m)).join(t("and_join"));
 }
 
 function handleStart(msg) {
@@ -1791,7 +1975,7 @@ function handleStart(msg) {
   // La cuenta de 3 ya corrió en el lobby (starting): acá solo el pitazo inicial.
   const d = document.createElement("div");
   d.className = "overlay-text";
-  d.textContent = "¡A JUGAR!";
+  d.textContent = t("play_overlay");
   overlayEl.appendChild(d);
   overlayTimers.push(
     setTimeout(() => {
@@ -1961,17 +2145,17 @@ function handleGoal(msg) {
   const goalText = document.createElement("div");
   goalText.className = "goal-text";
   if (msg.ownGoal) {
-    goalText.textContent = "¡GOL EN CONTRA!";
+    goalText.textContent = t("owngoal_title");
     if (scorer) goalText.style.color = scorer.c1;
     else if (conceded) goalText.style.color = conceded.c1;
   } else if (scorer) {
-    goalText.textContent = "¡GOL DE " + scorerName.toUpperCase() + "!";
+    goalText.textContent = t("goal_by", { name: scorerName }).toUpperCase();
     goalText.style.color = scorer.c1;
   } else if (scorerTeam) {
-    goalText.textContent = "¡GOL DE " + teamLabel(scorerTeam).toUpperCase() + "!";
+    goalText.textContent = t("goal_by", { name: teamLabel(scorerTeam) }).toUpperCase();
     goalText.style.color = scorerTeam.c1;
   } else {
-    goalText.textContent = "¡GOL!";
+    goalText.textContent = t("goal");
   }
   overlayEl.appendChild(goalText);
 
@@ -1979,12 +2163,12 @@ function handleGoal(msg) {
   sub.className = "overlay-sub";
   if (msg.ownGoal) {
     sub.textContent = scorer
-      ? scorerName + " la mandó contra su propio arco"
+      ? t("owngoal_sub", { name: scorerName })
       : conceded
-        ? teamLabel(conceded) + " la mandó contra su propio arco"
+        ? t("owngoal_sub", { name: teamLabel(conceded) })
         : "";
   } else {
-    sub.textContent = conceded ? "En el arco de " + teamLabel(conceded) : "";
+    sub.textContent = conceded ? t("goal_sub_in", { name: teamLabel(conceded) }) : "";
   }
   overlayEl.appendChild(sub);
 
@@ -2060,10 +2244,10 @@ function handleGolden() {
   const d = document.createElement("div");
   d.className = "goal-text golden-goal";
   d.style.color = "#f5c542";
-  d.textContent = "¡GOL DE ORO!";
+  d.textContent = t("golden_title");
   const sub = document.createElement("div");
   sub.className = "overlay-sub";
-  sub.textContent = "El próximo gol gana el partido";
+  sub.textContent = t("golden_sub");
   overlayEl.append(d, sub);
   overlayTimers.push(
     setTimeout(() => {
@@ -2094,19 +2278,19 @@ function handleGameover(msg) {
   flag.textContent = wt && wt.flags ? wt.flags : "🏆";
   const name = document.createElement("div");
   name.className = "winner-name";
-  name.textContent = wt ? teamLabel(wt) : "Campeón";
+  name.textContent = wt ? teamLabel(wt) : t("champion_default");
   const sub = document.createElement("div");
   sub.className = "winner-sub";
   // v1.3: "Campeones" si el equipo tiene más de un USUARIO (no cuerpos: en duo
   // un usuario con 2 cuerpos sigue siendo UN campeón).
   const winnerUsers = wt ? (wt.users && wt.users.length ? wt.users.length : wt.members.length) : 1;
-  sub.textContent = winnerUsers > 1 ? "¡Campeones del PoliGol!" : "¡Campeón del PoliGol!";
+  sub.textContent = winnerUsers > 1 ? t("champion_many") : t("champion_one");
   card.append(flag, name, sub);
   // v1.3 (SPEC D): reason como subtítulo extra cuando aplica.
   if (msg.reason === "golden" || msg.reason === "time") {
     const why = document.createElement("div");
     why.className = "winner-reason overlay-sub";
-    why.textContent = msg.reason === "golden" ? "¡Gol de oro!" : "Se terminó el tiempo";
+    why.textContent = msg.reason === "golden" ? t("reason_golden") : t("reason_time");
     card.appendChild(why);
   }
   overlayEl.appendChild(card);
@@ -2274,7 +2458,7 @@ function updateMatchClock(tl) {
   const el = ensureMatchClock();
   if (!el) return;
   if (golden) {
-    el.textContent = "GOL DE ORO";
+    el.textContent = t("clock_golden");
     el.classList.add("golden");
   } else {
     el.textContent = fmtClock(tl);
@@ -4598,7 +4782,7 @@ const TRAIN_BOT_COUNTRIES = ["BR", "DE", "FR"];
 
 function startTraining() {
   if (!PHYS) {
-    toast("El motor de física aún no cargó, probá de nuevo");
+    toast(t("toast_phys_loading"));
     return;
   }
   if (training) return;
@@ -4656,7 +4840,7 @@ function startTraining() {
   overlayEl.textContent = "";
   const d = document.createElement("div");
   d.className = "overlay-text";
-  d.textContent = "¡A ENTRENAR!";
+  d.textContent = t("train_overlay");
   overlayEl.appendChild(d);
   overlayTimers.push(
     setTimeout(() => {
@@ -4832,18 +5016,18 @@ function trainingKickRing(bodyId) {
 }
 
 function onTrainingGoal() {
-  const t = training;
-  t.goals++;
+  const tr = training; // NO usar `t` acá: chocaría con la función i18n t()
+  tr.goals++;
   updateTrainingGoals();
-  t.paused = true;
-  t.resetAt = performance.now() + 1100;
+  tr.paused = true;
+  tr.resetAt = performance.now() + 1100;
   clearOverlayTimers();
   overlayEl.textContent = "";
   // v1.6: en dúo no existe un cuerpo con id "me" (son me_a/me_b) — usar uno propio.
   const me = match.players.find((p) => p.owner === "me") || { c1: "#5ee88a", c2: "#ffffff" };
   const goalText = document.createElement("div");
   goalText.className = "goal-text";
-  goalText.textContent = "¡GOL!";
+  goalText.textContent = t("goal");
   goalText.style.color = me.c1;
   overlayEl.appendChild(goalText);
   overlayTimers.push(
@@ -5011,12 +5195,22 @@ if (modeSelect) {
   if (!hasDuo) {
     const opt = document.createElement("option");
     opt.value = "duo";
-    opt.textContent = "👥 Dúo (2 cuerpos c/u)";
+    opt.setAttribute("data-i18n", "mode_duo");
+    opt.textContent = t("mode_duo");
     modeSelect.appendChild(opt);
   }
 }
 
 if (joystickEl) joystickEl.style.visibility = "hidden"; // solo aparece bajo el dedo
+
+// v1.8 i18n: wiring de los selectores ES/EN + aplicar idioma al HTML estático.
+for (const b of document.querySelectorAll(".lang-btn")) {
+  b.addEventListener("click", () => setLang(b.getAttribute("data-lang")));
+}
+applyI18n();
+syncLangToggle();
+updateMatchValueOptions(); // traduce las opciones "N goles"/"N min" del objetivo
+
 syncSettingsUI();
 showScreen("home"); // arranca el polling de salas públicas
 requestAnimationFrame(frame);

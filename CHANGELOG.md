@@ -4,6 +4,19 @@ Todos los cambios notables de PoliGol se documentan acá.
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es/) y el proyecto usa
 versionado semántico.
 
+## [1.8.0] — 2026-06-13
+
+Inglés + español (i18n).
+
+### Agregado
+- **El juego está en dos idiomas: Español e Inglés.** Cada botón, opción, etiqueta,
+  cartel y mensaje está traducido (menú, lobby, opciones, modales, overlays de gol/
+  campeón, toasts y hasta los errores del servidor).
+- **Selector de idioma 🌐 ES / EN** en Opciones y arriba del popup de perfil. El
+  idioma se guarda en el dispositivo y por defecto toma el del navegador (si está en
+  español arranca en ES, si no en EN). Se puede cambiar en cualquier momento y la
+  interfaz se re-traduce al instante.
+
 ## [1.7.1] — 2026-06-12
 
 App instalable (PWA).
