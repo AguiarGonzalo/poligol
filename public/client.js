@@ -5020,3 +5020,11 @@ if (joystickEl) joystickEl.style.visibility = "hidden"; // solo aparece bajo el 
 syncSettingsUI();
 showScreen("home"); // arranca el polling de salas públicas
 requestAnimationFrame(frame);
+
+// v1.7: PWA — registrar el service worker (instalable + offline). Falla en silencio
+// (http sin TLS local, navegador sin soporte, etc.) sin afectar el juego.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  });
+}

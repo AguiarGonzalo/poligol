@@ -4,6 +4,21 @@ Todos los cambios notables de PoliGol se documentan acá.
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es/) y el proyecto usa
 versionado semántico.
 
+## [1.7.1] — 2026-06-12
+
+App instalable (PWA).
+
+### Agregado
+- **PoliGol se puede instalar como app**: desde el navegador (📲 "Agregar a pantalla
+  de inicio" en iPhone, o "Instalar app" en Chrome/Android) queda con su **ícono
+  propio** y abre **a pantalla completa, sin barras del navegador** — como una app
+  nativa. Resuelve el caso de Safari iPhone donde el botón de pantalla completa no
+  tenía efecto.
+- Íconos del juego (balón de PoliGol) en 192/512 + maskable + apple-touch.
+- Manifest (`manifest.webmanifest`) y service worker (`sw.js`, network-first):
+  el contenido se mantiene fresco mientras hay conexión y el juego abre **offline**
+  una vez visitado.
+
 ## [1.7.0] — 2026-06-12
 
 Se siente un juego de verdad, no una página web.
