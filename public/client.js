@@ -215,6 +215,9 @@ const I18N = {
     chip_goals: "a {v} goles", chip_goal1: "a 1 gol", chip_min: "{m} min",
     opt_goals: "{v} goles", opt_goal1: "1 gol", opt_min: "{m} min",
     resp_auto: "Automática (recomendada)", resp_manual: "Manual · {ms} ms",
+    opt_arena: "Cancha",
+    arena_2: "▭ Rectángulo (2 arcos)", arena_3: "△ Triángulo (3 arcos)", arena_4: "◻ Cuadrado (4 arcos)",
+    arena_5: "⬠ Pentágono (5 arcos)", arena_6: "⬡ Hexágono (6 arcos)", arena_7: "Heptágono (7 arcos)", arena_8: "Octágono (8 arcos)",
   },
   en: {
     tagline: "Multiplayer football · fast and lag-free",
@@ -271,6 +274,9 @@ const I18N = {
     chip_goals: "to {v} goals", chip_goal1: "to 1 goal", chip_min: "{m} min",
     opt_goals: "{v} goals", opt_goal1: "1 goal", opt_min: "{m} min",
     resp_auto: "Automatic (recommended)", resp_manual: "Manual · {ms} ms",
+    opt_arena: "Field",
+    arena_2: "▭ Rectangle (2 goals)", arena_3: "△ Triangle (3 goals)", arena_4: "◻ Square (4 goals)",
+    arena_5: "⬠ Pentagon (5 goals)", arena_6: "⬡ Hexagon (6 goals)", arena_7: "Heptagon (7 goals)", arena_8: "Octagon (8 goals)",
   },
 };
 // Mensajes del servidor (vienen en español): se traducen en el cliente por texto.
@@ -729,7 +735,7 @@ let extWorld = null;       // último mundo extrapolado renderizado (clon de bas
 // localmente a 60 Hz (sin servidor, sin latencia). Cuando training != null, el
 // pipeline de render/input se alimenta de su estado local en vez de la red.
 let training = null;       // { state, accMs, lastNs, goals, defenders, stadium, duo, ... } o null
-let trainingCfg = { defenders: 0, stadium: "clasico", duo: false };
+let trainingCfg = { defenders: 0, stadium: "clasico", duo: false, arena: 2 };
 // Offset de corrección por disco (id → {dx,dy}); render = extrapolado + offset, el
 // offset decae a 0 en ~120 ms (anti-snap). La pelota usa la clave "__ball__".
 const dragOffset = new Map();
@@ -4790,7 +4796,7 @@ function startTraining() {
   const country = selectedCountry || (prof && prof.country) || "AR";
   const name = (nameInput.value.trim() || (prof && prof.name) || "Vos").slice(0, 16);
   myId = "me";
-  buildTrainingMatch(name, country, trainingCfg.defenders, trainingCfg.stadium, trainingCfg.duo);
+  buildTrainingMatch(name, country, trainingCfg.defenders, trainingCfg.stadium, trainingCfg.duo, trainingCfg.arena);
   training = {
     state: buildTrainingState(),
     accMs: 0,
@@ -4801,6 +4807,7 @@ function startTraining() {
     defenders: trainingCfg.defenders,
     stadium: trainingCfg.stadium,
     duo: trainingCfg.duo,
+    arena: trainingCfg.arena,
   };
   // Buffers de red/extrapolación: no se usan en entrenamiento.
   baseState = null;
@@ -4849,18 +4856,19 @@ function startTraining() {
   );
 }
 
-// Objeto `match` para que el render funcione (bounds/arena/goals/posts/players/byId/
-// teams). Vos = team 0 (izquierda), rivales = team 1 (derecha). En dúo controlás 2
-// cuerpos (mode "duo" ⇒ isDuo() ⇒ doble joystick/teclas A·B, igual que online).
-function buildTrainingMatch(name, country, defenders, stadium, duo) {
-  const n = 2;
+// Objeto `match` para que el render funcione. `sides` = cantidad de arcos/lados de
+// la cancha (2 = rectángulo, 3 = triángulo, 4 = cuadrado… hasta 8 = octágono, igual
+// que el FFA online). Vos = team 0; los rivales se reparten en los OTROS arcos. En
+// dúo controlás 2 cuerpos (mode "duo" ⇒ isDuo() ⇒ doble joystick/teclas A·B).
+function buildTrainingMatch(name, country, defenders, stadium, duo, sides) {
+  const n = Math.max(2, Math.min(8, (sides | 0) || 2));
   baseArena = PHYS.buildArena(n, stadium);
   const verts = polygonVerts(n);
   const bounds = vertsBounds(verts);
   const meInfo = countryInfo(country);
   const players = [];
   const myIds = [];
-  // Cuerpo(s) propio(s): 1 en solo, 2 en dúo (owner "me", slots 0/1).
+  // Cuerpo(s) propio(s): 1 en solo, 2 en dúo (owner "me", slots 0/1) — equipo 0.
   const mySlots = duo ? [0, 1] : [0];
   for (const slot of mySlots) {
     const id = duo ? "me_" + (slot === 1 ? "b" : "a") : "me";
@@ -4870,25 +4878,32 @@ function buildTrainingMatch(name, country, defenders, stadium, duo) {
       c1: meInfo.c1, c2: meInfo.c2, flag: flagOf(country),
     });
   }
+  // Rivales repartidos en arcos distintos (equipos 1..n-1) para defender cada arco.
   for (let i = 0; i < defenders; i++) {
     const bc = TRAIN_BOT_COUNTRIES[i % TRAIN_BOT_COUNTRIES.length];
     const bi = countryInfo(bc);
+    const team = n === 2 ? 1 : 1 + (i % (n - 1));
     players.push({
-      id: "bot" + i, name: "Coco " + (i + 1), country: bc, team: 1, owner: "bot" + i,
+      id: "bot" + i, name: "Coco " + (i + 1), country: bc, team: team, owner: "bot" + i,
       slot: 0, c1: bi.c1, c2: bi.c2, flag: flagOf(bc),
     });
   }
   const byId = new Map(players.map((p) => [p.id, p]));
-  const mine = players.filter((p) => p.owner === "me");
-  const mkTeam = (idx, members) => ({
-    index: idx, members: members, users: members,
-    c1: members[0] ? members[0].c1 : "#9fb0c8",
-    c2: members[0] ? members[0].c2 : "#ffffff",
-    flags: members.map((m) => m.flag).join(""),
-  });
+  // UNA entrada de equipo por arco (0..n-1) para que drawGoals pinte TODOS los arcos
+  // (los arcos sin dueño quedan en gris neutro pero igual se pueden meter goles).
+  const teams = [];
+  for (let k = 0; k < n; k++) {
+    const members = players.filter((p) => p.team === k);
+    const rep = members[0];
+    teams.push({
+      index: k, members: members, users: members,
+      c1: rep ? rep.c1 : "#9fb0c8", c2: rep ? rep.c2 : "#ffffff",
+      flags: members.map((m) => m.flag).join(""),
+    });
+  }
   match = {
     mode: duo ? "duo" : "training", stadium: stadium, n: n, players: players, byId: byId,
-    teams: [mkTeam(0, mine), mkTeam(1, players.filter((p) => p.owner !== "me"))],
+    teams: teams,
     myTeam: 0, myBodyIds: new Set(myIds),
     ownerNames: new Map([["me", name]]),
     target: "goals", value: 0, golden: false, tackles: true,
@@ -4912,17 +4927,29 @@ function buildTrainingState() {
   return { bodies: bodies, ball: PHYS.makeBall(), rules: { tackles: true } };
 }
 
-// Saque: tus cuerpos a la izquierda mirando al arco derecho (en dúo separados ±55);
-// rivales cerca del arco derecho (el que atacás), repartidos en y si son 2.
+// Saque GENÉRICO (sirve para cualquier forma): cada cuerpo aparece a mitad de camino
+// entre el centro y SU arco, mirando al centro; los que comparten arco se separan a
+// lo largo de la línea del arco. (En rectángulo: vos a la izquierda, rivales al lado
+// que defienden — igual que antes.)
+function goalForTeam(team) {
+  const goals = match.goals || [];
+  for (const g of goals) if (g.team === team) return g;
+  return goals[0] || null;
+}
 function trainingSpawn(pl) {
-  if (pl.owner === "me") {
-    const y = pl.slot === 1 ? 55 : trainingCfg.duo ? -55 : 0;
-    return { x: -RECT_W * 0.5, y: y, fx: 1, fy: 0 };
-  }
-  const bots = match.players.filter((p) => p.owner !== "me");
-  const idx = bots.indexOf(pl);
-  const y = bots.length <= 1 ? 0 : idx === 0 ? -70 : 70;
-  return { x: RECT_W * 0.55, y: y, fx: -1, fy: 0 };
+  const g = goalForTeam(pl.team);
+  if (!g) return { x: 0, y: 0, fx: 1, fy: 0 };
+  const baseX = g.cx * 0.5;
+  const baseY = g.cy * 0.5; // a mitad de camino centro→arco
+  const teammates = match.players.filter((p) => p.team === pl.team);
+  const idx = Math.max(0, teammates.indexOf(pl));
+  const off = (idx - (teammates.length - 1) / 2) * 60; // separación entre compañeros
+  return {
+    x: baseX + g.dx * off,
+    y: baseY + g.dy * off,
+    fx: -g.nx, // mirando al centro (la normal del arco apunta hacia afuera)
+    fy: -g.ny,
+  };
 }
 
 // Avance por frame con paso fijo de 60 Hz (acumulador de tiempo real).
@@ -4979,28 +5006,28 @@ function trainingTick() {
   if (PHYS.goalCheck(t.state.ball, match.arena) >= 0) onTrainingGoal();
 }
 
-// IA simple del rival: se interpone entre la pelota y su arco (derecha) y despeja
-// al contacto. Beatable pero presente. Usa la MISMA física que el jugador.
+// IA del rival (GENÉRICA para cualquier forma): defiende SU arco interponiéndose
+// entre la pelota y el centro de su arco, y despeja al contacto. Beatable pero
+// presente. Usa la MISMA física que el jugador.
 function aiInput(bot) {
   const ball = training.state.ball;
-  const goalX = RECT_W; // arco propio de los rivales (derecha)
+  const g = goalForTeam(bot.team);
+  const gx = g ? g.cx : 0;
+  const gy = g ? g.cy : 0;
   const db = Math.hypot(ball.x - bot.x, ball.y - bot.y);
-  // Desafiar la pelota SOLO si está cerca Y en su mitad/centro (no se va a perseguir
-  // hasta el área del atacante): ir directo y despejar al contacto.
-  if (ball.x > -40 && db < 60) {
+  if (db < 64) {
+    // Pelota cerca: ir directo y despejar al contacto.
     const mx = ball.x - bot.x;
     const my = ball.y - bot.y;
     const l = Math.hypot(mx, my) || 1;
     return { mx: mx / l, my: my / l, kick: db < 32, tackle: false };
   }
-  // Si no, mantener posición GOAL-SIDE: a 90u de la pelota HACIA el arco propio
-  // (queda entre la pelota y su arco), sin cruzar mucho a la mitad rival.
-  let vx = goalX - ball.x;
-  let vy = 0 - ball.y;
+  // Interponerse a ~90u de la pelota HACIA su arco (queda entre la pelota y el arco).
+  const vx = gx - ball.x;
+  const vy = gy - ball.y;
   const gl = Math.hypot(vx, vy) || 1;
-  let tx = ball.x + (vx / gl) * 90;
+  const tx = ball.x + (vx / gl) * 90;
   const ty = ball.y + (vy / gl) * 90;
-  if (tx < -30) tx = -30; // no perseguir hacia la mitad del atacante
   const mx = tx - bot.x;
   const my = ty - bot.y;
   const ml = Math.hypot(mx, my) || 1;
@@ -5099,10 +5126,11 @@ function rebuildTraining() {
   const mePl = match.players.find((p) => p.owner === "me");
   const name = (match.ownerNames && match.ownerNames.get("me")) || "Vos";
   const country = mePl ? mePl.country : "AR";
-  buildTrainingMatch(name, country, trainingCfg.defenders, training.stadium, trainingCfg.duo);
+  buildTrainingMatch(name, country, trainingCfg.defenders, training.stadium, trainingCfg.duo, trainingCfg.arena);
   training.state = buildTrainingState();
   training.defenders = trainingCfg.defenders;
   training.duo = trainingCfg.duo;
+  training.arena = trainingCfg.arena;
   training.paused = false;
   training.goals = goals;
   ringFx = [];
@@ -5128,6 +5156,12 @@ function setTrainingDuo(duo) {
   rebuildTraining();
 }
 
+function setTrainingArena(sides) {
+  trainingCfg.arena = Math.max(2, Math.min(8, (sides | 0) || 2));
+  syncTrainingHud();
+  rebuildTraining();
+}
+
 function updateTrainingGoals() {
   const el = $("th-goals");
   if (el) el.textContent = String(training ? training.goals : 0);
@@ -5142,6 +5176,8 @@ function syncTrainingHud() {
   for (const b of box.querySelectorAll(".th-bodies")) {
     b.classList.toggle("active", (b.dataset.bodies === "2") === trainingCfg.duo);
   }
+  const arenaSel = $("train-arena");
+  if (arenaSel) arenaSel.value = String(trainingCfg.arena);
 }
 
 /* ================================ Inicialización ================================ */
@@ -5161,6 +5197,7 @@ on($("btn-train-reset"), "click", () => resetTrainingBall(true));
       b.addEventListener("click", () => setTrainingDuo(b.dataset.bodies === "2"));
     }
   }
+  on($("train-arena"), "change", () => setTrainingArena(parseInt($("train-arena").value, 10)));
   syncTrainingHud();
 }
 

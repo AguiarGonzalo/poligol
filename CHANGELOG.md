@@ -4,6 +4,23 @@ Todos los cambios notables de PoliGol se documentan acá.
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es/) y el proyecto usa
 versionado semántico.
 
+## [1.9.0] — 2026-06-13
+
+Probar las canchas poligonales en el entrenamiento.
+
+### Agregado
+- **Selector de cancha en el Entrenamiento** (en la ⚙️): elegí la forma —
+  Rectángulo (2 arcos), Triángulo (3), Cuadrado (4), Pentágono (5), Hexágono (6),
+  Heptágono (7) u Octágono (8). Es la misma cancha poligonal con un arco por lado que
+  aparece en los partidos online "Todos contra todos" (3 jugadores = triángulo, 4 =
+  cuadrado, y así). Ahora podés practicar en cualquiera de esas formas vos solo.
+- Los **rivales de la máquina** se reparten en arcos distintos y cada uno defiende el
+  suyo (en polígonos también). Los arcos sin dueño quedan libres para meterla igual.
+
+### Nota
+- Esto ya existía en los partidos online (FFA); lo nuevo es poder **probarlo solo**
+  desde el entrenamiento, en español e inglés.
+
 ## [1.8.0] — 2026-06-13
 
 Inglés + español (i18n).
