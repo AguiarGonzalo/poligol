@@ -930,3 +930,40 @@ rearma conservando goles. Bug corregido: `onTrainingGoal` ya no asume un cuerpo 
 - Opciones: "⚡ Respuesta" (antes "Predicción ≈ ½ RTT") con texto "Automática (recomendada)".
 - Mobile: el home más corto por las pestañas; HUD de entrenamiento compacto en landscape
   (`@media (max-height:460px)` oculta la ayuda); todo verificado en preview mobile/landscape.
+
+---
+
+# v1.7 — Sensación de juego: perfil, menú, modales, pantalla completa, sin scroll (SOLO cliente)
+
+Sin cambios de protocolo/server. index.html + style.css + client.js.
+
+## A. Perfil (nombre + país) de una sola vez
+Popup `#profile-modal` con `#name-input` + `#country-grid` + `#btn-profile-save`. Primera
+vez (sin `poligol.profile`) se abre obligatorio (no se cierra con backdrop/Esc). Guarda en
+localStorage y no se vuelve a pedir. Se edita desde `#btn-edit-profile` (Opciones) o el chip
+`#player-chip` (arriba izq, solo en el menú). `requireProfile()` devuelve el perfil o abre el
+popup. Create/join/train usan el perfil guardado (ya no inputs en el home).
+
+## B. Menú principal limpio
+`#screen-home` = logo + `#btn-create` / `#btn-join` / `#btn-train` (botones grandes) + ⚙️
+(`#btn-options`) arriba der + chip arriba izq. Se eliminaron del home los campos de
+crear/unirse y la lista de salas (pasaron a modales).
+
+## C. Modales
+Sistema `.modal` (overlay) + `.modal-card` + `.modal-close` (data-close), backdrop/Esc cierran.
+- `#create-modal`: `#room-name-input` + visibilidad + `#btn-create-confirm`.
+- `#join-modal`: `#rooms-list` (push de subRooms) + `#room-input` + `#btn-join-confirm`.
+- `#options-modal`: ahora `.modal`; incluye `#training-options` (visible solo entrenando),
+  `#opt-fullscreen`, sección Perfil (`#opt-profile-name` + `#btn-edit-profile`).
+
+## D. Entrenamiento: HUD minimal + controles en la ⚙️
+`#training-hud` pasa a ser un chip chico (solo "🎯 Goles N"). Los controles (`.th-bodies`,
+`.th-def`, `#btn-train-reset`, `#btn-train-exit`) viven en `#training-options` dentro de
+Opciones (se muestran solo si `training`). El engranaje del juego (`#btn-game-options`) los abre.
+
+## E. Pantalla completa + sin scroll
+- `#opt-fullscreen`: requestFullscreen/exitFullscreen (documentElement), con fallbacks webkit/ms;
+  sincroniza con `fullscreenchange`. Sigue el auto-fullscreen+landscape al entrar al juego en táctil.
+- `html, body { overflow: hidden }`, body `position: fixed; inset: 0`, `overscroll-behavior: none`,
+  `touch-action: manipulation`. `main` y pantallas `position: absolute/fixed; inset: 0`; home/lobby
+  con `overflow-y: auto` (scroll interno). El documento NO scrollea (sensación de app/juego).

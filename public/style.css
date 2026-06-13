@@ -44,11 +44,19 @@
 
 html {
   height: 100%;
+  overflow: hidden; /* v1.7: sensación de juego — el documento NO scrollea */
   -webkit-text-size-adjust: 100%;
 }
 
 body {
-  min-height: 100dvh;
+  /* v1.7: el body ocupa el viewport fijo y NO scrollea (nada de "arrastrar" la
+     página como en una web). Cada pantalla que pueda ser más alta scrollea
+     INTERNAMENTE. Esto mata el rebote/pull-to-refresh del navegador. */
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100dvh;
+  overflow: hidden;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   font-weight: 600;
   color: var(--ink);
@@ -60,6 +68,7 @@ body {
     linear-gradient(180deg, var(--bg) 0%, #070b16 100%);
   background-attachment: fixed;
   overscroll-behavior: none;
+  touch-action: manipulation; /* sin doble-tap-zoom ni delay; el juego usa touch-action:none */
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -74,7 +83,8 @@ body::before {
 }
 
 main {
-  position: relative;
+  position: fixed;
+  inset: 0;
   z-index: 1;
 }
 
@@ -243,11 +253,74 @@ ul {
    HOME
    ============================================================ */
 #screen-home {
-  min-height: 100dvh;
+  position: absolute;
+  inset: 0;
+  overflow-y: auto; /* scroll interno si no entra (no scrollea el body) */
   display: grid;
   place-items: center;
   padding: clamp(12px, 3vw, 32px);
 }
+
+/* ---------- Menú principal (v1.7): logo + 3 botones grandes ---------- */
+.menu {
+  width: min(380px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: clamp(22px, 5vh, 44px);
+  text-align: center;
+}
+
+.menu-header {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.menu-buttons {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.btn-menu {
+  width: 100%;
+  font-size: 1.15rem;
+  padding: 1.05em 1em;
+  border-radius: var(--radius-md);
+}
+
+/* Chip de jugador (arriba izquierda) — quién sos. */
+.player-chip {
+  position: fixed;
+  top: calc(14px + env(safe-area-inset-top, 0px));
+  left: calc(14px + env(safe-area-inset-left, 0px));
+  z-index: 60;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 50vw;
+  padding: 8px 14px 8px 11px;
+  border-radius: 999px;
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: var(--ink);
+  font-weight: 700;
+  transition: border-color var(--speed) var(--ease), transform var(--speed) var(--ease);
+}
+.player-chip:hover { border-color: rgba(245, 197, 66, 0.55); }
+.player-chip:active { transform: scale(0.96); }
+.chip-flag { font-size: 1.15rem; line-height: 1; }
+.chip-name {
+  max-width: 34vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chip-edit { color: var(--ink-faint); font-size: 0.85rem; }
 
 /* v1.1: el home se divide en dos tarjetas (crear/perfil + salas públicas) */
 .home-layout {
@@ -457,7 +530,9 @@ ul {
    LOBBY
    ============================================================ */
 #screen-lobby {
-  min-height: 100dvh;
+  position: absolute;
+  inset: 0;
+  overflow-y: auto; /* scroll interno (no scrollea el body) */
   display: grid;
   place-items: center;
   padding: clamp(12px, 3vw, 32px);
@@ -1831,6 +1906,119 @@ body.in-game .gear-btn-global {
 /* ============================================================
    MODAL DE OPCIONES (glassmorphism)
    ============================================================ */
+/* ============================================================
+   Sistema de modales (v1.7): perfil / crear / unirse / opciones.
+   Overlay .modal + tarjeta .modal-card centrada que scrollea internamente.
+   ============================================================ */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(4, 7, 15, 0.66);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  animation: fade-in 0.2s var(--ease);
+}
+
+.modal-card {
+  position: relative;
+  width: min(420px, 100%);
+  max-height: calc(100dvh - 36px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  overflow-y: auto;
+  padding: clamp(20px, 4vw, 30px);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: rgba(16, 27, 51, 0.74);
+  animation: pop-bounce 0.4s var(--ease);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+
+.modal-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 1rem;
+  color: var(--ink-dim);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--glass-border);
+  transition: color var(--speed) var(--ease), background-color var(--speed) var(--ease);
+}
+.modal-close:hover {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.13);
+}
+
+.modal-title {
+  font-size: 1.25rem;
+  font-weight: 900;
+  text-align: center;
+  letter-spacing: -0.01em;
+}
+
+.modal-sub {
+  text-align: center;
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+  line-height: 1.5;
+  margin-top: -6px;
+}
+
+/* Divisor de sección dentro de un modal (Opciones / Entrenamiento / Perfil) */
+.opt-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--ink-faint);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  margin: 2px 0;
+}
+.opt-divider::before,
+.opt-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--glass-border), transparent);
+}
+
+/* Bloque de controles de entrenamiento dentro de Opciones */
+.training-options {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+.training-options.hidden {
+  display: none;
+}
+
+/* Lista de salas públicas dentro del modal Unirse */
+.join-rooms {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.join-rooms .rooms-list {
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.btn-compact {
+  padding: 0.5em 1.1em;
+  font-size: 0.88rem;
+}
+
 .options-modal {
   position: fixed;
   inset: 0;
@@ -2280,20 +2468,19 @@ body.in-game .gear-btn-global {
     padding: 0.65em 1.5em;
   }
 
-  /* ---- Modal de opciones compacto ---- */
-  .options-modal {
+  /* ---- Modales compactos en mobile ---- */
+  .modal {
     padding: 10px;
   }
 
-  .options-card {
+  .modal-card {
     max-height: calc(100dvh - 20px);
-    padding: 14px 16px;
-    gap: 8px;
+    padding: 16px 16px;
+    gap: 9px;
   }
 
-  .options-title {
-    font-size: 0.85rem;
-    margin-bottom: 0;
+  .modal-title {
+    font-size: 1.1rem;
   }
 
   .opt-row {
@@ -2302,6 +2489,11 @@ body.in-game .gear-btn-global {
 
   .opt-label {
     font-size: 0.84rem;
+  }
+
+  .btn-menu {
+    font-size: 1.05rem;
+    padding: 0.95em 1em;
   }
 }
 
@@ -2361,106 +2553,68 @@ body.in-game .gear-btn-global {
   letter-spacing: 0.2px;
 }
 
+/* v1.7: marcador MINIMAL de entrenamiento (chip arriba-centro, como un juego real).
+   Los controles (rivales, cuerpos, reiniciar, salir) viven en la ⚙️ → #training-options. */
 .training-hud {
   position: absolute;
   top: calc(10px + env(safe-area-inset-top, 0px));
   left: 50%;
   transform: translateX(-50%);
   z-index: 26;
-  display: flex;
-  flex-direction: column;
+  display: inline-flex;
+  align-items: center;
   gap: 8px;
-  padding: 12px 16px;
-  width: min(92vw, 540px);
+  padding: 8px 18px;
+  border-radius: 999px;
   background: var(--glass-bg-strong);
   border: 1px solid var(--glass-border);
-  border-radius: var(--radius-md);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
-  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  font-weight: 700;
+  color: var(--ink-dim);
+  pointer-events: none;
 }
 .training-hud.hidden { display: none; }
-
-.training-hud .th-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.training-hud .th-title {
-  font-weight: 800;
-  color: var(--gold-2);
-}
-.training-hud .th-stat {
-  color: var(--ink-dim);
-  font-weight: 600;
-}
+.training-hud .th-title { font-size: 1.05rem; }
 .training-hud .th-stat b {
   color: var(--ink);
-  font-size: 1.25rem;
+  font-size: 1.2rem;
   margin-left: 4px;
 }
-.training-hud .th-controls {
-  flex-wrap: wrap;
-  justify-content: flex-start;
-}
-.training-hud .th-label {
-  color: var(--ink-faint);
-  font-size: 0.82rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-}
-.training-hud .th-seg {
+
+/* Selector segmentado de entrenamiento (en la ⚙️ → #training-options): 1/2, 0/1/2. */
+.th-seg {
   display: inline-flex;
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-sm);
   overflow: hidden;
+  flex-shrink: 0;
 }
-.training-hud .th-def {
+.th-seg button {
   appearance: none;
   border: 0;
   background: transparent;
   color: var(--ink-dim);
   font-weight: 800;
-  padding: 6px 13px;
+  padding: 7px 16px;
   cursor: pointer;
   transition: background-color var(--speed) var(--ease), color var(--speed) var(--ease);
 }
-.training-hud .th-def:hover { background: var(--glass-bg); color: var(--ink); }
-.training-hud .th-def.active {
+.th-seg button:hover {
+  background: var(--glass-bg);
+  color: var(--ink);
+}
+.th-seg button.active {
   background: var(--gold);
   color: #1a1304;
 }
-.training-hud .th-btn {
-  padding: 6px 14px;
-  font-size: 0.9rem;
-}
-.training-hud .th-hint {
-  margin: 0;
-  color: var(--ink-faint);
-  font-size: 0.74rem;
-  line-height: 1.4;
-}
-.training-hud kbd {
-  font: inherit;
-  font-size: 0.72rem;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid var(--glass-border);
-  border-radius: 5px;
-  padding: 1px 5px;
-}
 
-/* En landscape bajo (móvil acostado) el HUD se compacta y oculta la ayuda. */
 @media (max-height: 460px) {
   .training-hud {
     top: 6px;
-    padding: 8px 12px;
-    gap: 6px;
-    width: min(96vw, 560px);
+    padding: 6px 14px;
   }
-  .training-hud .th-hint { display: none; }
-  .training-hud .th-def { padding: 5px 11px; }
 }
 
 /* ---------- Indicador de ping (#ping-indicator, dentro de #screen-game) ----------

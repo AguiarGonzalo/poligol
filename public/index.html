@@ -4,7 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#0a0f1e">
-  <meta name="description" content="PoliGol — fútbol multijugador online en tiempo real sobre una cancha poligonal. Primero a 3 goles gana.">
+  <!-- Sensación de app/juego (sin barra del navegador al agregar a inicio) -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="PoliGol">
+  <meta name="description" content="PoliGol — fútbol multijugador online en tiempo real sobre una cancha poligonal.">
   <title>⚽ PoliGol</title>
   <link rel="stylesheet" href="style.css">
   <!-- Núcleo de física compartido (v1.4 HaxBall): expone window.PoliPhysics y
@@ -15,98 +20,29 @@
 <body>
   <main>
 
-    <!-- Engranaje global (visible en home y lobby; el juego usa #btn-game-options) -->
+    <!-- Chip de jugador (arriba izquierda): quién sos. Tocar → editar perfil.
+         Visible solo en el menú/lobby (no en el juego). -->
+    <button id="player-chip" class="player-chip hidden" type="button" aria-label="Editar perfil">
+      <span id="chip-flag" class="chip-flag" aria-hidden="true"></span>
+      <span id="chip-name" class="chip-name">—</span>
+      <span class="chip-edit" aria-hidden="true">✎</span>
+    </button>
+
+    <!-- Engranaje (arriba derecha). En el juego se usa #btn-game-options. -->
     <button id="btn-options" class="gear-btn gear-btn-global" type="button" aria-label="Opciones" title="Opciones">⚙️</button>
 
-    <!-- ============ HOME ============ -->
-    <section id="screen-home" aria-label="Inicio">
-      <div class="home-layout">
-
-        <div class="home-card glass">
-          <header class="home-header">
-            <h1 class="game-title">⚽ <span class="title-grad">PoliGol</span></h1>
-            <p class="game-tagline">Fútbol multijugador en cancha poligonal · rápido y sin delay</p>
-          </header>
-
-          <div class="field">
-            <label class="field-label" for="name-input">Tu nombre</label>
-            <input id="name-input" class="text-input" type="text" placeholder="Tu nombre"
-                   maxlength="16" autocomplete="off" spellcheck="false">
-          </div>
-
-          <div class="field">
-            <p class="field-label" id="country-grid-label">Elegí tu selección</p>
-            <div id="country-grid" class="country-grid" role="listbox" aria-labelledby="country-grid-label"></div>
-          </div>
-
-          <!-- Selector de acción: cada panel muestra SOLO los campos de esa acción
-               (crear / unirse / entrenar) para que nada esté fuera de contexto. -->
-          <div class="field">
-            <p class="field-label" id="action-label">¿Qué querés hacer?</p>
-            <div class="segmented home-tabs" role="tablist" aria-labelledby="action-label">
-              <input class="seg-input" type="radio" id="tab-create" name="home-action" value="create" checked>
-              <label class="seg-label" for="tab-create" role="tab">⚽ Crear</label>
-              <input class="seg-input" type="radio" id="tab-join" name="home-action" value="join">
-              <label class="seg-label" for="tab-join" role="tab">🔑 Unirse</label>
-              <input class="seg-input" type="radio" id="tab-train" name="home-action" value="train">
-              <label class="seg-label" for="tab-train" role="tab">🎯 Entrenar</label>
-            </div>
-          </div>
-
-          <div class="home-actions">
-            <!-- CREAR -->
-            <div id="panel-create" class="action-panel">
-              <div class="field">
-                <label class="field-label" for="room-name-input">Nombre de tu sala</label>
-                <input id="room-name-input" class="text-input" type="text" placeholder="Sala de…"
-                       maxlength="24" autocomplete="off" spellcheck="false">
-              </div>
-              <div class="field">
-                <p class="field-label" id="visibility-label">Visibilidad</p>
-                <div class="segmented" role="radiogroup" aria-labelledby="visibility-label">
-                  <input class="seg-input" type="radio" id="vis-public" name="visibility" value="public">
-                  <label class="seg-label" for="vis-public">🌐 Pública</label>
-                  <input class="seg-input" type="radio" id="vis-private" name="visibility" value="private" checked>
-                  <label class="seg-label" for="vis-private">🔒 Privada</label>
-                </div>
-                <p class="field-hint">Pública: aparece en la lista para cualquiera · Privada: solo con el código</p>
-              </div>
-              <button id="btn-create" class="btn btn-primary btn-block" type="button">Crear sala</button>
-            </div>
-
-            <!-- UNIRSE -->
-            <div id="panel-join" class="action-panel hidden">
-              <div class="field">
-                <label class="field-label" for="room-input">Código de sala</label>
-                <div class="join-row">
-                  <input id="room-input" class="text-input room-input" type="text" placeholder="CÓDIGO"
-                         maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false"
-                         aria-label="Código de sala (4 letras)">
-                  <button id="btn-join" class="btn btn-secondary" type="button">Unirse</button>
-                </div>
-                <p class="field-hint">¿No tenés código? Tocá una sala pública de la lista.</p>
-              </div>
-            </div>
-
-            <!-- ENTRENAR -->
-            <div id="panel-train" class="action-panel hidden">
-              <p class="field-hint train-blurb">Practicá solo al instante, sin esperar a nadie — con rivales de la máquina opcionales. Ideal para agarrarle la mano al control y a la pelota.</p>
-              <button id="btn-train" class="btn btn-primary btn-block" type="button">🎯 Empezar a entrenar</button>
-            </div>
-          </div>
+    <!-- ============ MENÚ PRINCIPAL ============ -->
+    <section id="screen-home" aria-label="Menú principal">
+      <div class="menu">
+        <header class="menu-header">
+          <h1 class="game-title">⚽ <span class="title-grad">PoliGol</span></h1>
+          <p class="game-tagline">Fútbol multijugador · rápido y sin delay</p>
+        </header>
+        <div class="menu-buttons">
+          <button id="btn-create" class="btn btn-primary btn-menu" type="button">⚽ Crear sala</button>
+          <button id="btn-join" class="btn btn-secondary btn-menu" type="button">🔑 Unirse</button>
+          <button id="btn-train" class="btn btn-ghost btn-menu" type="button">🎯 Entrenar</button>
         </div>
-
-        <aside class="rooms-card glass" aria-label="Salas públicas">
-          <header class="rooms-header">
-            <h2 class="rooms-title">🌐 Salas públicas</h2>
-            <button id="btn-refresh-rooms" class="btn-refresh" type="button"
-                    aria-label="Refrescar lista de salas" title="Refrescar">🔄</button>
-          </header>
-          <ul id="rooms-list" class="rooms-list" aria-live="polite">
-            <li class="rooms-empty">No hay salas públicas — creá la tuya</li>
-          </ul>
-        </aside>
-
       </div>
     </section>
 
@@ -157,8 +93,7 @@
               </select>
             </div>
           </div>
-          <!-- v1.4 E: barrida opcional por sala (default ON). Con tackles=false el
-               juego es "HaxBall puro" — el cliente oculta los controles de barrida. -->
+          <!-- v1.4 E: barrida opcional por sala (default ON). -->
           <div class="config-field config-field-rule">
             <label class="rule-toggle">
               <span class="field-label">🦵 Barrida</span>
@@ -198,34 +133,17 @@
       </div>
     </section>
 
-    <!-- ============ GAME ============ -->
+    <!-- ============ JUEGO ============ -->
     <section id="screen-game" class="hidden" aria-label="Partido">
       <canvas id="game-canvas"></canvas>
 
       <div id="scoreboard" class="scoreboard" aria-live="polite"></div>
 
-      <!-- HUD de entrenamiento (modo solo, client-side): visible solo en Entrenar -->
+      <!-- HUD de entrenamiento MINIMAL (solo el marcador). Los controles
+           (rivales, cuerpos, reiniciar, salir) viven en la ⚙️ → #training-options. -->
       <div id="training-hud" class="training-hud hidden">
-        <div class="th-row">
-          <span class="th-title">🎯 Entrenamiento</span>
-          <span class="th-stat">Goles <b id="th-goals">0</b></span>
-        </div>
-        <div class="th-row th-controls">
-          <span class="th-label">Controlás</span>
-          <div class="th-seg" role="group" aria-label="Cuántos cuerpos controlás">
-            <button class="th-bodies" data-bodies="1" type="button">1</button>
-            <button class="th-bodies" data-bodies="2" type="button">2</button>
-          </div>
-          <span class="th-label">Rivales</span>
-          <div class="th-seg" role="group" aria-label="Rivales">
-            <button class="th-def" data-def="0" type="button">0</button>
-            <button class="th-def" data-def="1" type="button">1</button>
-            <button class="th-def" data-def="2" type="button">2</button>
-          </div>
-          <button id="btn-train-reset" class="btn btn-ghost th-btn" type="button" title="Reiniciar la pelota (R)">↺ Pelota</button>
-          <button id="btn-train-exit" class="btn btn-ghost th-btn" type="button">Salir</button>
-        </div>
-        <p class="th-hint">Mantené <kbd>Espacio</kbd>/⚽ para patear · apuntás moviendo el cuerpo · <kbd>R</kbd> reinicia la pelota</p>
+        <span class="th-title">🎯</span>
+        <span class="th-stat">Goles <b id="th-goals">0</b></span>
       </div>
 
       <div id="match-clock" class="match-clock hidden" aria-live="off"></div>
@@ -234,7 +152,7 @@
 
       <div id="duo-keys-hint" class="duo-keys-hint hidden" aria-hidden="true">
         <div class="duo-keys-card">
-          <p class="duo-keys-title">🎮 Modo Dúo — controlás 2 cuerpos</p>
+          <p class="duo-keys-title">🎮 Controlás 2 cuerpos</p>
           <div class="duo-keys-cols">
             <div class="duo-keys-col">
               <p class="duo-keys-body">Cuerpo A</p>
@@ -278,10 +196,103 @@
       </div>
     </section>
 
-    <!-- ============ MODAL DE OPCIONES ============ -->
-    <div id="options-modal" class="options-modal hidden" role="dialog" aria-modal="true" aria-labelledby="options-title">
-      <div class="options-card glass">
-        <h2 id="options-title" class="options-title">⚙️ Opciones</h2>
+    <!-- ============ MODAL: PERFIL (primera vez + editar) ============ -->
+    <div id="profile-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="profile-title">
+      <div class="modal-card glass">
+        <h2 id="profile-title" class="modal-title">⚽ ¡Bienvenido a PoliGol!</h2>
+        <p id="profile-sub" class="modal-sub">Elegí tu nombre y tu selección. Se guarda en este dispositivo — no lo vas a tener que poner de nuevo.</p>
+        <div class="field">
+          <label class="field-label" for="name-input">Tu nombre</label>
+          <input id="name-input" class="text-input" type="text" placeholder="Tu nombre"
+                 maxlength="16" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field">
+          <p class="field-label" id="country-grid-label">Tu selección</p>
+          <div id="country-grid" class="country-grid" role="listbox" aria-labelledby="country-grid-label"></div>
+        </div>
+        <button id="btn-profile-save" class="btn btn-primary btn-block" type="button">Guardar y jugar</button>
+      </div>
+    </div>
+
+    <!-- ============ MODAL: CREAR SALA ============ -->
+    <div id="create-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="create-title">
+      <div class="modal-card glass">
+        <button class="modal-close" type="button" data-close="create-modal" aria-label="Cerrar">✕</button>
+        <h2 id="create-title" class="modal-title">⚽ Nueva sala</h2>
+        <div class="field">
+          <label class="field-label" for="room-name-input">Nombre de la sala</label>
+          <input id="room-name-input" class="text-input" type="text" placeholder="Sala de…"
+                 maxlength="24" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field">
+          <p class="field-label" id="visibility-label">Visibilidad</p>
+          <div class="segmented" role="radiogroup" aria-labelledby="visibility-label">
+            <input class="seg-input" type="radio" id="vis-public" name="visibility" value="public">
+            <label class="seg-label" for="vis-public">🌐 Pública</label>
+            <input class="seg-input" type="radio" id="vis-private" name="visibility" value="private" checked>
+            <label class="seg-label" for="vis-private">🔒 Privada</label>
+          </div>
+          <p class="field-hint">Pública: aparece en la lista para cualquiera · Privada: solo con el código</p>
+        </div>
+        <button id="btn-create-confirm" class="btn btn-primary btn-block" type="button">Crear sala</button>
+      </div>
+    </div>
+
+    <!-- ============ MODAL: UNIRSE ============ -->
+    <div id="join-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="join-title">
+      <div class="modal-card glass">
+        <button class="modal-close" type="button" data-close="join-modal" aria-label="Cerrar">✕</button>
+        <h2 id="join-title" class="modal-title">🔑 Unirse a una sala</h2>
+        <div class="join-rooms">
+          <header class="rooms-header">
+            <h3 class="rooms-title">🌐 Salas públicas</h3>
+            <button id="btn-refresh-rooms" class="btn-refresh" type="button"
+                    aria-label="Refrescar lista de salas" title="Refrescar">🔄</button>
+          </header>
+          <ul id="rooms-list" class="rooms-list" aria-live="polite">
+            <li class="rooms-empty">No hay salas públicas — creá la tuya</li>
+          </ul>
+        </div>
+        <div class="field">
+          <label class="field-label" for="room-input">o con un código</label>
+          <div class="join-row">
+            <input id="room-input" class="text-input room-input" type="text" placeholder="CÓDIGO"
+                   maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false"
+                   aria-label="Código de sala (4 letras)">
+            <button id="btn-join-confirm" class="btn btn-secondary" type="button">Unirse</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ MODAL: OPCIONES ============ -->
+    <div id="options-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="options-title">
+      <div class="modal-card options-card glass">
+        <button class="modal-close" type="button" data-close="options-modal" aria-label="Cerrar">✕</button>
+        <h2 id="options-title" class="modal-title">⚙️ Opciones</h2>
+
+        <!-- Entrenamiento: solo cuando estás entrenando (client.js togglea .hidden) -->
+        <div id="training-options" class="training-options hidden">
+          <div class="opt-divider"><span>🎯 Entrenamiento</span></div>
+          <div class="opt-row">
+            <label class="opt-label">Controlás</label>
+            <div class="th-seg" role="group" aria-label="Cuántos cuerpos controlás">
+              <button class="th-bodies" data-bodies="1" type="button">1</button>
+              <button class="th-bodies" data-bodies="2" type="button">2</button>
+            </div>
+          </div>
+          <div class="opt-row">
+            <label class="opt-label">Rivales</label>
+            <div class="th-seg" role="group" aria-label="Rivales">
+              <button class="th-def" data-def="0" type="button">0</button>
+              <button class="th-def" data-def="1" type="button">1</button>
+              <button class="th-def" data-def="2" type="button">2</button>
+            </div>
+          </div>
+          <button id="btn-train-reset" class="btn btn-secondary btn-block" type="button">↺ Reiniciar la pelota</button>
+          <button id="btn-train-exit" class="btn btn-ghost btn-block" type="button">Salir del entrenamiento</button>
+          <div class="opt-divider"><span>Ajustes</span></div>
+        </div>
 
         <div class="opt-row">
           <label class="opt-label" for="opt-sound">🔊 Volumen</label>
@@ -289,14 +300,18 @@
                  aria-label="Volumen general">
         </div>
 
-        <!-- Relator: SOLO visible si hay un pack de voz real instalado (v1.6).
-             Sin pack, esta fila se oculta (client.js la togglea). -->
+        <!-- Relator: SOLO visible si hay un pack de voz real instalado (v1.6). -->
         <div id="relator-setting" class="hidden">
           <div class="opt-row">
             <label class="opt-label" for="opt-relator">🎙️ Relator</label>
             <input id="opt-relator" class="opt-check" type="checkbox" checked>
           </div>
           <p id="relator-pack-label" class="relator-pack-label"></p>
+        </div>
+
+        <div class="opt-row">
+          <label class="opt-label" for="opt-fullscreen">🖥️ Pantalla completa</label>
+          <input id="opt-fullscreen" class="opt-check" type="checkbox">
         </div>
 
         <div class="opt-row">
@@ -317,14 +332,19 @@
           <input id="opt-names" class="opt-check" type="checkbox" checked>
         </div>
 
-        <!-- v1.4 H: extrapolación de mundo completo. 0 = Auto (≈ medio RTT, tope
-             200 ms); >0 fuerza esos ms. Más = más responsivo, más "snap" al fallar. -->
+        <!-- v1.4 H: extrapolación de mundo completo. 0 = Auto. -->
         <div class="opt-row">
           <label class="opt-label" for="opt-extrapolation">⚡ Respuesta</label>
           <input id="opt-extrapolation" class="opt-range" type="range" min="0" max="200" step="10" value="0"
-                 aria-label="Extrapolación (0 = Auto)">
+                 aria-label="Respuesta de red (0 = Auto)">
         </div>
         <p id="opt-extrapolation-label" class="relator-pack-label">Auto</p>
+
+        <div class="opt-divider"><span>Perfil</span></div>
+        <div class="opt-row">
+          <span class="opt-label">👤 <span id="opt-profile-name">—</span></span>
+          <button id="btn-edit-profile" class="btn btn-ghost btn-compact" type="button">Editar</button>
+        </div>
 
         <button id="btn-options-close" class="btn btn-primary btn-block" type="button">Listo</button>
       </div>

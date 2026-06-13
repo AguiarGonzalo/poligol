@@ -4,6 +4,30 @@ Todos los cambios notables de PoliGol se documentan acá.
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es/) y el proyecto usa
 versionado semántico.
 
+## [1.7.0] — 2026-06-12
+
+Se siente un juego de verdad, no una página web.
+
+### Cambiado
+- **Menú principal de juego**: ahora es logo + 3 botones grandes (**Crear sala /
+  Unirse / Entrenar**) + la ⚙️ arriba a la derecha. Limpio y directo, como un juego.
+- **Perfil de una sola vez**: la primera vez aparece un popup pidiendo nombre +
+  selección. Se **guarda en el dispositivo** y no te lo vuelve a pedir nunca. Se
+  cambia desde la ⚙️ (Editar) o tocando tu chip arriba a la izquierda.
+- **Crear / Unirse** son ventanas (modales): "Crear sala" abre nombre + visibilidad;
+  "Unirse" abre la lista de salas públicas + el campo de código.
+- **Sin scroll de página**: el juego no se desliza arriba/abajo como una web — quedó
+  bloqueado (sin rebote ni "pull to refresh"). Cada pantalla que no entra scrollea
+  internamente.
+
+### Agregado
+- **Pantalla completa**: nuevo toggle "🖥️ Pantalla completa" en Opciones (funciona en
+  compu y celular) — además del automático al entrar a jugar en el teléfono.
+- **Menú de entrenamiento dentro de la ⚙️**: en el entrenamiento ya no hay una barra
+  fija ocupando la pantalla. Queda solo el marcador (un chip chico arriba) y los
+  controles (rivales, 1/2 jugadores, reiniciar la pelota, salir) se abren desde la
+  ruedita.
+
 ## [1.6.0] — 2026-06-12
 
 Repaso de menús, consistencia y mobile.

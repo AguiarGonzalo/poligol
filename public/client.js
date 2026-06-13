@@ -322,6 +322,23 @@ const optExtrapolation = $("opt-extrapolation");   // v1.4 H (range 0–200 ms, 
 const optExtrapolationLabel = $("opt-extrapolation-label"); // v1.4 H (texto Auto/N ms)
 const btnOptionsClose = $("btn-options-close");    // v1.1
 const relatorPackLabel = $("relator-pack-label");  // v1.2 (SPEC D): pack activo o "Voz sintética"
+const optFullscreen = $("opt-fullscreen");         // v1.7 (checkbox pantalla completa)
+const trainingOptions = $("training-options");     // v1.7 (controles de entreno en la ⚙️)
+const optProfileName = $("opt-profile-name");      // v1.7 (nombre en sección Perfil)
+const btnEditProfile = $("btn-edit-profile");      // v1.7
+// Menú principal + modales (v1.7)
+const btnTrain = $("btn-train");
+const playerChip = $("player-chip");
+const chipFlag = $("chip-flag");
+const chipName = $("chip-name");
+const profileModal = $("profile-modal");
+const profileTitle = $("profile-title");
+const profileSub = $("profile-sub");
+const btnProfileSave = $("btn-profile-save");
+const createModal = $("create-modal");
+const btnCreateConfirm = $("btn-create-confirm");
+const joinModal = $("join-modal");
+const btnJoinConfirm = $("btn-join-confirm");
 // Contenedores v1 (pueden cambiar en el HTML v1.1: usar con guardas)
 const endgameActions = document.querySelector(".endgame-actions");
 const lobbyCard = document.querySelector(".lobby-card");
@@ -381,6 +398,7 @@ function syncSettingsUI() {
   if (optVibration) optVibration.checked = settings.vibration;
   if (optNames) optNames.checked = settings.names;
   if (optExtrapolation) optExtrapolation.value = String(settings.extrapolation);
+  if (optFullscreen) optFullscreen.checked = !!document.fullscreenElement; // v1.7
   updateExtrapolationLabel(); // v1.4 H: "Auto" / "N ms"
   updateRelatorPackLabel(); // v1.2 (SPEC D): nombre del pack o "Voz sintética"
 }
@@ -395,6 +413,10 @@ function updateExtrapolationLabel() {
 function openOptions() {
   if (!optionsModal) return;
   syncSettingsUI();
+  // v1.7: los controles de entrenamiento viven en la ⚙️ — visibles solo entrenando.
+  if (trainingOptions) trainingOptions.classList.toggle("hidden", !training);
+  if (training) syncTrainingHud();
+  updatePlayerChip(); // refresca el nombre de la sección Perfil
   optionsModal.classList.remove("hidden");
 }
 
@@ -805,6 +827,8 @@ function showScreen(name) {
   // body.in-game: oculta el engranaje global durante el partido (style.css) sin
   // depender de :has(), que falta en Firefox <121 y Safari/iOS <15.4.
   document.body.classList.toggle("in-game", name === "game");
+  // v1.7: el chip de jugador (arriba izq) solo en el menú principal.
+  if (playerChip) playerChip.classList.toggle("hidden", name !== "home" || !loadProfile());
   // v1.2: suscripción push de salas públicas SOLO mientras el home está visible.
   if (name === "home") homeRoomsOn();
   else homeRoomsOff();
@@ -815,6 +839,7 @@ function goHome(sendLeave) {
   if (sendLeave && ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "leave" }));
   }
+  closeAllModals(); // v1.7: cerrar opciones/crear/unirse al volver al menú
   // v1.5: salir del entrenamiento (modo local) limpia su estado y restaura el HUD.
   if (training) {
     training = null;
@@ -882,85 +907,164 @@ function buildCountryGrid() {
   }
 }
 
-function validateHome(needCode) {
-  const name = nameInput.value.trim();
+/* ====================== Perfil (nombre + país) — v1.7 ======================
+ * Se pide UNA sola vez (popup al entrar), se guarda en localStorage y se reusa en
+ * todo. Se edita desde la ⚙️ (Editar) o tocando el chip de jugador. El menú nunca
+ * vuelve a pedirlo. */
+function updatePlayerChip() {
+  const p = loadProfile();
+  if (chipFlag && p && p.country) chipFlag.textContent = flagOf(p.country);
+  if (chipName && p && p.name) chipName.textContent = p.name;
+  if (optProfileName) {
+    optProfileName.textContent = p && p.name ? p.name + " " + flagOf(p.country) : "—";
+  }
+  // Visibilidad: solo en el menú principal y con perfil guardado.
+  if (playerChip) playerChip.classList.toggle("hidden", phase !== "home" || !(p && p.name));
+}
+
+let profileFirstRun = false;
+function openProfileModal(firstRun) {
+  profileFirstRun = !!firstRun;
+  const p = loadProfile();
+  if (p) {
+    if (nameInput) nameInput.value = p.name || "";
+    if (p.country) selectCountry(p.country);
+  }
+  if (profileTitle) profileTitle.textContent = firstRun ? "⚽ ¡Bienvenido a PoliGol!" : "👤 Tu perfil";
+  if (profileSub) {
+    profileSub.textContent = firstRun
+      ? "Elegí tu nombre y tu selección. Se guarda en este dispositivo — no lo vas a tener que poner de nuevo."
+      : "Cambiá tu nombre o tu selección cuando quieras.";
+  }
+  if (btnProfileSave) btnProfileSave.textContent = firstRun ? "Guardar y jugar" : "Guardar";
+  closeModalEl(optionsModal);
+  openModalEl(profileModal);
+}
+
+function saveProfileFromModal() {
+  const name = (nameInput.value || "").trim();
   if (!name) {
     toast("Escribí tu nombre");
     nameInput.focus();
-    return null;
+    return;
   }
   if (!selectedCountry) {
     toast("Elegí tu selección");
-    return null;
+    return;
   }
-  if (needCode) {
-    const code = roomInput.value.trim().toUpperCase();
-    if (!/^[A-Z]{4}$/.test(code)) {
-      toast("El código de sala tiene 4 letras");
-      roomInput.focus();
-      return null;
-    }
-    return { name, country: selectedCountry, room: code };
-  }
-  return { name, country: selectedCountry };
+  saveProfile(name, selectedCountry);
+  updatePlayerChip();
+  closeModalEl(profileModal);
 }
 
+// Perfil vigente (guardado), o null si todavía no lo configuró.
+function requireProfile() {
+  const p = loadProfile();
+  if (!p || !p.name) {
+    openProfileModal(true);
+    return null;
+  }
+  return p;
+}
+
+/* ----------------------------- Modales genéricos ----------------------------- */
+function openModalEl(el) {
+  if (el) el.classList.remove("hidden");
+}
+function closeModalEl(el) {
+  if (el) el.classList.add("hidden");
+}
+function closeAllModals() {
+  for (const el of [profileModal, createModal, joinModal, optionsModal]) closeModalEl(el);
+}
+
+// ✕ y click en el fondo cierran (el perfil obligatorio de primera vez NO).
+for (const b of document.querySelectorAll(".modal-close")) {
+  b.addEventListener("click", () => closeModalEl($(b.dataset.close)));
+}
+for (const el of [createModal, joinModal, optionsModal]) {
+  if (!el) continue;
+  el.addEventListener("mousedown", (e) => {
+    if (e.target === el) closeModalEl(el);
+  });
+}
+if (profileModal) {
+  profileModal.addEventListener("mousedown", (e) => {
+    if (e.target === profileModal && !profileFirstRun) closeModalEl(profileModal);
+  });
+}
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  for (const el of [createModal, joinModal, optionsModal]) {
+    if (el && !el.classList.contains("hidden")) {
+      closeModalEl(el);
+      return;
+    }
+  }
+  if (profileModal && !profileModal.classList.contains("hidden") && !profileFirstRun) {
+    closeModalEl(profileModal);
+  }
+});
+
+/* ------------------------------ Acciones del menú ------------------------------ */
+on(btnProfileSave, "click", saveProfileFromModal);
+on(nameInput, "keydown", (e) => {
+  if (e.key === "Enter") saveProfileFromModal();
+});
+on(playerChip, "click", () => openProfileModal(false));
+on(btnEditProfile, "click", () => openProfileModal(false));
+
 on(btnCreate, "click", () => {
-  const v = validateHome(false);
-  if (!v) return;
-  saveProfile(v.name, v.country);
+  const p = requireProfile();
+  if (!p) return;
+  if (roomNameInput) roomNameInput.placeholder = "Sala de " + p.name;
+  openModalEl(createModal);
+});
+on(btnCreateConfirm, "click", () => {
+  const p = requireProfile();
+  if (!p) return;
   const visibility = visPublic && visPublic.checked ? "public" : "private"; // default privada
   let roomName = roomNameInput ? roomNameInput.value.trim() : "";
-  if (!roomName) roomName = "Sala de " + v.name;
+  if (!roomName) roomName = "Sala de " + p.name;
   roomName = roomName.slice(0, ROOM_NAME_MAX);
-  wsSend({ type: "create", name: v.name, country: v.country, visibility, roomName });
+  wsSend({ type: "create", name: p.name, country: p.country, visibility, roomName });
+  closeModalEl(createModal);
 });
 
 on(btnJoin, "click", () => {
-  const v = validateHome(true);
-  if (!v) return;
-  saveProfile(v.name, v.country);
-  wsSend({ type: "join", name: v.name, country: v.country, room: v.room });
+  if (requireProfile()) openModalEl(joinModal);
+});
+function doJoin(code) {
+  const p = requireProfile();
+  if (!p) return;
+  code = (code || "").trim().toUpperCase();
+  if (!/^[A-Z]{4}$/.test(code)) {
+    toast("El código de sala tiene 4 letras");
+    if (roomInput) roomInput.focus();
+    return;
+  }
+  wsSend({ type: "join", name: p.name, country: p.country, room: code });
+  closeModalEl(joinModal);
+}
+on(btnJoinConfirm, "click", () => doJoin(roomInput ? roomInput.value : ""));
+
+on(btnTrain, "click", () => {
+  if (requireProfile()) startTraining();
 });
 
 on(roomInput, "input", () => {
   roomInput.value = roomInput.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 4);
 });
 on(roomInput, "keydown", (e) => {
-  if (e.key === "Enter") btnJoin.click();
-});
-on(nameInput, "keydown", (e) => {
-  if (e.key === "Enter") {
-    const t = activeHomeTab();
-    if (t === "join") btnJoin.click();
-    else if (t === "train") startTraining();
-    else btnCreate.click();
-  }
+  if (e.key === "Enter") doJoin(roomInput.value);
 });
 
-/* v1.6: pestañas del home (Crear / Unirse / Entrenar). Solo se muestra el panel de
- * la acción elegida, así cada campo (nombre de sala, código…) está en su contexto. */
-function activeHomeTab() {
-  const checked = document.querySelector('input[name="home-action"]:checked');
-  return checked ? checked.value : "create";
-}
-function setHomeTab(tab) {
-  const panelCreate = $("panel-create");
-  const panelJoin = $("panel-join");
-  const panelTrain = $("panel-train");
-  if (panelCreate) panelCreate.classList.toggle("hidden", tab !== "create");
-  if (panelJoin) panelJoin.classList.toggle("hidden", tab !== "join");
-  if (panelTrain) panelTrain.classList.toggle("hidden", tab !== "train");
-}
-for (const id of ["tab-create", "tab-join", "tab-train"]) {
-  on($(id), "change", () => setHomeTab($(id).value));
-}
-setHomeTab(activeHomeTab());
-
-// ?room=CODE en la URL → precargar el código en el home (SPEC).
+// ?room=CODE en la URL → abrir el modal de unirse con el código precargado.
 {
   const urlRoom = new URLSearchParams(location.search).get("room");
-  if (urlRoom) roomInput.value = urlRoom.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 4);
+  if (urlRoom && roomInput) {
+    roomInput.value = urlRoom.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 4);
+  }
 }
 
 /* ------------------------- Salas públicas (#rooms-list) ------------------------- */
@@ -1094,12 +1198,7 @@ function renderRooms(list) {
     joinBtn.type = "button";
     joinBtn.className = "btn btn-secondary btn-join-room";
     joinBtn.textContent = "Unirse";
-    joinBtn.addEventListener("click", () => {
-      const v = validateHome(false);
-      if (!v) return;
-      saveProfile(v.name, v.country);
-      wsSend({ type: "join", name: v.name, country: v.country, room: code });
-    });
+    joinBtn.addEventListener("click", () => doJoin(code));
 
     card.append(info, joinBtn);
     roomsList.appendChild(card);
@@ -2821,6 +2920,39 @@ function exitGameDisplay() {
     /* ignorar */
   }
 }
+
+/* v1.7: pantalla completa manual (toggle de Opciones, funciona en desktop y mobile).
+ * El cambio del checkbox ES gesto del usuario, así que requestFullscreen no se rechaza. */
+function requestFullscreenAll() {
+  try {
+    const el = document.documentElement;
+    const fn = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
+    if (fn) {
+      const p = fn.call(el);
+      if (p && p.catch) p.catch(() => {});
+    }
+  } catch (err) {
+    /* sin fullscreen */
+  }
+}
+function exitFullscreenAll() {
+  try {
+    const fn = document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen;
+    if (document.fullscreenElement && fn) {
+      const p = fn.call(document);
+      if (p && p.catch) p.catch(() => {});
+    }
+  } catch (err) {
+    /* ignorar */
+  }
+}
+on(optFullscreen, "change", () => {
+  if (optFullscreen.checked) requestFullscreenAll();
+  else exitFullscreenAll();
+});
+document.addEventListener("fullscreenchange", () => {
+  if (optFullscreen) optFullscreen.checked = !!document.fullscreenElement;
+});
 
 const portraitMq = window.matchMedia ? window.matchMedia("(orientation: portrait)") : null;
 
@@ -4818,12 +4950,12 @@ function updateTrainingGoals() {
 }
 
 function syncTrainingHud() {
-  const hud = $("training-hud");
-  if (!hud) return;
-  for (const b of hud.querySelectorAll(".th-def")) {
+  // v1.7: los controles de entreno viven en la ⚙️ (#training-options).
+  const box = trainingOptions || document;
+  for (const b of box.querySelectorAll(".th-def")) {
     b.classList.toggle("active", +b.dataset.def === trainingCfg.defenders);
   }
-  for (const b of hud.querySelectorAll(".th-bodies")) {
+  for (const b of box.querySelectorAll(".th-bodies")) {
     b.classList.toggle("active", (b.dataset.bodies === "2") === trainingCfg.duo);
   }
 }
@@ -4831,29 +4963,33 @@ function syncTrainingHud() {
 /* ================================ Inicialización ================================ */
 buildCountryGrid();
 
-// v1.5: wiring del modo entrenamiento (botón del home + controles del HUD).
-on($("btn-train"), "click", startTraining);
+// v1.5/v1.7: controles del entrenamiento (ahora en la ⚙️ → #training-options).
+// "Salir" cierra la ⚙️ y vuelve al menú; "Reiniciar" repone la pelota.
 on($("btn-train-exit"), "click", () => goHome(false));
 on($("btn-train-reset"), "click", () => resetTrainingBall(true));
 {
-  const trainHud = $("training-hud");
-  if (trainHud) {
-    for (const b of trainHud.querySelectorAll(".th-def")) {
+  const box = trainingOptions;
+  if (box) {
+    for (const b of box.querySelectorAll(".th-def")) {
       b.addEventListener("click", () => setTrainingDefenders(+b.dataset.def));
     }
-    for (const b of trainHud.querySelectorAll(".th-bodies")) {
+    for (const b of box.querySelectorAll(".th-bodies")) {
       b.addEventListener("click", () => setTrainingDuo(b.dataset.bodies === "2"));
     }
   }
   syncTrainingHud();
 }
 
-// Precargar perfil (nombre + país) desde localStorage "poligol.profile".
+// v1.7: perfil (nombre + país). Si ya está guardado → chip + precarga del modal.
+// Si NO → popup obligatorio de bienvenida (se pide UNA sola vez por dispositivo).
 {
   const prof = loadProfile();
-  if (prof) {
-    if (prof.name && !nameInput.value) nameInput.value = prof.name.slice(0, 16);
+  if (prof && prof.name) {
+    if (nameInput) nameInput.value = prof.name.slice(0, 16);
     if (prof.country) selectCountry(prof.country);
+    updatePlayerChip();
+  } else {
+    openProfileModal(true);
   }
 }
 
